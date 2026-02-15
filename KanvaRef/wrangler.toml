@@ -5,5 +5,5 @@ pages_build_output_dir = "./dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "kanvaref-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "dd1bdc73-b43d-44c1-bbc9-a31977b4fbc5"
 preview_database_id = "REPLACE_WITH_YOUR_D1_PREVIEW_DATABASE_ID"
