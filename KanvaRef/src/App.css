@@ -402,7 +402,7 @@ body.theme-light .left-toolbar__button.is-active {
   opacity: 0.6;
   pointer-events: none;
   z-index: 2000;
-  color: var(--text-muted, rgba(255, 255, 255, 0.7));
+  color: #ffffff;
 }
 
 @media (max-width: 900px) {
