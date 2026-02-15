@@ -1,0 +1,9 @@
+name = "kanvaref"
+compatibility_date = "2026-02-15"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kanvaref-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+preview_database_id = "REPLACE_WITH_YOUR_D1_PREVIEW_DATABASE_ID"

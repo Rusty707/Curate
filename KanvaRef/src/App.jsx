@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, Sun, Trash2, Unlock } from 'lucide-react'
 import { Board } from './pages/Board'
+import { AppVersion } from './components/AppVersion'
 import { generateBoardId } from './utils/id'
 import './App.css'
 
 const NAV_ICON_SIZE = 20
 const ICON_STROKE_WIDTH = 2.3
-const RECENT_BOARDS_KEY = 'kanvaref-recent-boards'
+const RECENT_BOARDS_KEY = 'curate-recent-boards'
 const MAX_RECENT_BOARDS = 12
 
 function normalizeRecentBoards(value) {
@@ -59,7 +60,7 @@ function App() {
   const navigate = useNavigate()
   const location = useLocation()
   const [copied, setCopied] = useState(false)
-  const [theme, setTheme] = useState(() => localStorage.getItem('kanvaref-theme') || 'dark')
+  const [theme, setTheme] = useState(() => localStorage.getItem('curate-theme') || 'dark')
   const [isBoardsOpen, setIsBoardsOpen] = useState(false)
   const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false })
   const [editingBoardId, setEditingBoardId] = useState(null)
@@ -91,7 +92,7 @@ function App() {
   useEffect(() => {
     document.body.classList.toggle('theme-light', theme === 'light')
     document.body.classList.toggle('theme-dark', theme !== 'light')
-    localStorage.setItem('kanvaref-theme', theme)
+    localStorage.setItem('curate-theme', theme)
   }, [theme])
 
   useEffect(() => {
@@ -151,8 +152,8 @@ function App() {
         isCanvasLocked: Boolean(detail.isCanvasLocked),
       })
     }
-    window.addEventListener('kanvaref:toolbar-state', handleCanvasToolbarState)
-    return () => window.removeEventListener('kanvaref:toolbar-state', handleCanvasToolbarState)
+    window.addEventListener('curate:toolbar-state', handleCanvasToolbarState)
+    return () => window.removeEventListener('curate:toolbar-state', handleCanvasToolbarState)
   }, [])
 
   async function handleShare() {
@@ -161,7 +162,44 @@ function App() {
     }
 
     try {
-      await navigator.clipboard.writeText(window.location.href)
+      const storageKey = `curate-board-${currentBoardId}`
+      const rawBoard = localStorage.getItem(storageKey)
+      let parsedBoard = {
+        objects: [],
+        images: [],
+        comments: [],
+      }
+      if (rawBoard) {
+        try {
+          const candidate = JSON.parse(rawBoard)
+          if (candidate && typeof candidate === 'object') {
+            parsedBoard = candidate
+          }
+        } catch {
+          parsedBoard = {
+            objects: [],
+            images: [],
+            comments: [],
+          }
+        }
+      }
+      const response = await fetch('/api/share', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ board: parsedBoard }),
+      })
+      if (!response.ok) {
+        setCopied(false)
+        return
+      }
+      const data = await response.json()
+      if (!data?.id || typeof data.id !== 'string') {
+        setCopied(false)
+        return
+      }
+      await navigator.clipboard.writeText(`${window.location.origin}/board/${data.id}`)
       setCopied(true)
     } catch {
       setCopied(false)
@@ -183,9 +221,9 @@ function App() {
     event.stopPropagation()
     const confirmed = window.confirm('Remove this board from your recent list and local data?')
     if (!confirmed) return
-    localStorage.removeItem(`kanvaref-board-${boardId}`)
-    localStorage.removeItem(`kanvaref-board-snap-${boardId}`)
-    localStorage.removeItem(`kanvaref-board-snap-images-${boardId}`)
+    localStorage.removeItem(`curate-board-${boardId}`)
+    localStorage.removeItem(`curate-board-snap-${boardId}`)
+    localStorage.removeItem(`curate-board-snap-images-${boardId}`)
     setRecentBoards((prev) => prev.filter((entry) => entry.id !== boardId))
     if (editingBoardId === boardId) {
       setEditingBoardId(null)
@@ -227,7 +265,7 @@ function App() {
   }
 
   function dispatchCanvasToolbarAction(action) {
-    window.dispatchEvent(new CustomEvent('kanvaref:toolbar-action', { detail: { action } }))
+    window.dispatchEvent(new CustomEvent('curate:toolbar-action', { detail: { action } }))
   }
 
   return (
@@ -382,6 +420,8 @@ function App() {
         <Route path="/" element={<RedirectToNewBoard />} />
         <Route path="/board/:id" element={<Board />} />
       </Routes>
+
+      <AppVersion />
     </div>
   )
 }

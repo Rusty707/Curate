@@ -394,6 +394,17 @@ body.theme-light .left-toolbar__button.is-active {
   pointer-events: none;
 }
 
+.app-version {
+  position: fixed;
+  bottom: 10px;
+  right: 12px;
+  font-size: 12px;
+  opacity: 0.6;
+  pointer-events: none;
+  z-index: 2000;
+  color: var(--text-muted, rgba(255, 255, 255, 0.7));
+}
+
 @media (max-width: 900px) {
   .top-nav {
     top: 10px;

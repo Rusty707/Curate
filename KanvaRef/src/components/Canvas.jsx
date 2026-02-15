@@ -682,9 +682,9 @@ function WorldOrigin() {
 export function Canvas() {
   const navigate = useNavigate()
   const { id: boardId } = useParams()
-  const storageKey = `kanvaref-board-${boardId}`
-  const snappingStorageKey = `kanvaref-board-snap-${boardId}`
-  const imageSnappingStorageKey = `kanvaref-board-snap-images-${boardId}`
+  const storageKey = `curate-board-${boardId}`
+  const snappingStorageKey = `curate-board-snap-${boardId}`
+  const imageSnappingStorageKey = `curate-board-snap-images-${boardId}`
   const initialBoardState = parseBoardState(localStorage.getItem(storageKey))
 
   const [images, setImages] = useState(initialBoardState.images)
@@ -1231,7 +1231,7 @@ export function Canvas() {
   }, [])
 
   useEffect(() => {
-    window.dispatchEvent(new CustomEvent('kanvaref:toolbar-state', {
+    window.dispatchEvent(new CustomEvent('curate:toolbar-state', {
       detail: { isCommentMode, isCanvasLocked },
     }))
   }, [isCommentMode, isCanvasLocked])
@@ -1251,8 +1251,8 @@ export function Canvas() {
         handleResetView()
       }
     }
-    window.addEventListener('kanvaref:toolbar-action', handleToolbarAction)
-    return () => window.removeEventListener('kanvaref:toolbar-action', handleToolbarAction)
+    window.addEventListener('curate:toolbar-action', handleToolbarAction)
+    return () => window.removeEventListener('curate:toolbar-action', handleToolbarAction)
   }, [isCommentMode, isCanvasLocked, offsetX, offsetY, scale, images])
 
   useEffect(() => {
