@@ -1,0 +1,5 @@
+/index.html
+  Cache-Control: no-store, no-cache, must-revalidate
+
+/api/*
+  Cache-Control: no-store

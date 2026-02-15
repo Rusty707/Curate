@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, Sun, Trash2, Unlock } from 'lucide-react'
 import { Board } from './pages/Board'
-import { AppVersion } from './components/AppVersion'
 import { generateBoardId } from './utils/id'
 import './App.css'
 
@@ -420,8 +419,6 @@ function App() {
         <Route path="/" element={<RedirectToNewBoard />} />
         <Route path="/board/:id" element={<Board />} />
       </Routes>
-
-      <AppVersion />
     </div>
   )
 }
