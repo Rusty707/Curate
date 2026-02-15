@@ -1,0 +1,494 @@
+.app-shell {
+  min-height: 100vh;
+  padding-top: 0;
+}
+
+body.theme-dark {
+  --canvas-bg: #212121;
+  --surface-panel: #2a2a2a;
+  --surface-elevated: #333333;
+  --surface-border: #3a3a3a;
+  --text-primary: #eaeaea;
+  --text-secondary: #b3b3b3;
+  --text-muted: #8a8a8a;
+  --logo-color: var(--text-primary);
+  --nav-fg: var(--text-primary);
+  --nav-fg-muted: var(--text-secondary);
+  --toast-fg: var(--text-primary);
+  --toast-bg: var(--surface-elevated);
+  --toast-border: var(--surface-border);
+  --canvas-grid-dot: rgba(234, 234, 234, 0.12);
+  --menu-bg: var(--surface-panel);
+  --menu-fg: var(--text-primary);
+  --menu-item-hover: var(--surface-elevated);
+  --menu-divider: var(--surface-border);
+  --menu-icon: var(--text-secondary);
+  --floating-surface-border: color-mix(in srgb, var(--menu-divider) 70%, transparent);
+  --floating-surface-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.24),
+    0 4px 10px rgba(0, 0, 0, 0.16);
+  --floating-surface-radius: 18px;
+}
+
+body.theme-light {
+  --logo-color: #111;
+  --nav-fg: rgba(16, 16, 16, 0.92);
+  --nav-fg-muted: rgba(16, 16, 16, 0.82);
+  --toast-fg: rgba(30, 44, 61, 0.95);
+  --toast-bg: rgba(236, 245, 255, 0.95);
+  --toast-border: rgba(124, 160, 203, 0.55);
+  --canvas-bg: #f7f8fa;
+  --canvas-grid-dot: rgba(0, 0, 0, 0.1);
+  --menu-bg: rgba(252, 253, 255, 0.93);
+  --menu-fg: rgba(24, 32, 42, 0.96);
+  --menu-item-hover: rgba(28, 38, 50, 0.08);
+  --menu-divider: rgba(34, 48, 64, 0.14);
+  --menu-icon: rgba(42, 58, 76, 0.92);
+  --floating-surface-border: color-mix(in srgb, var(--menu-divider) 88%, transparent);
+  --floating-surface-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.24),
+    0 4px 10px rgba(0, 0, 0, 0.16);
+  --floating-surface-radius: 18px;
+}
+
+.top-nav {
+  position: fixed;
+  top: 12px;
+  left: 16px;
+  right: 16px;
+  height: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.top-nav__left,
+.top-nav__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.left-toolbar {
+  position: fixed;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border-radius: 18px;
+  border: 1px solid var(--floating-surface-border, var(--menu-divider));
+  background: color-mix(in srgb, var(--menu-bg) 86%, transparent);
+  box-shadow: var(--floating-surface-shadow);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 1100;
+  pointer-events: auto;
+}
+
+.left-toolbar__boards {
+  position: relative;
+}
+
+.left-toolbar__divider {
+  width: 22px;
+  height: 1px;
+  background: var(--menu-divider);
+  opacity: 0.75;
+  margin: 2px 0;
+}
+
+.left-toolbar__button {
+  position: relative;
+  color: var(--nav-fg);
+  transition: transform 110ms ease;
+}
+
+.left-toolbar__button:hover {
+  transform: translateY(-1px);
+}
+
+.left-toolbar__button::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--menu-fg);
+  padding: 6px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--floating-surface-border, var(--menu-divider));
+  background: color-mix(in srgb, var(--menu-bg) 90%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--floating-surface-shadow);
+  transition: opacity 120ms ease;
+}
+
+.left-toolbar__button:hover::after {
+  opacity: 1;
+}
+
+.left-toolbar__button.is-active {
+  --btn-bg: color-mix(in srgb, var(--surface-panel, #2a2a2a) 86%, #7aa8e8 14%);
+  --btn-bg-hover: color-mix(in srgb, var(--surface-elevated, #333333) 80%, #7aa8e8 20%);
+  --btn-bg-active: color-mix(in srgb, var(--surface-elevated, #333333) 74%, #7aa8e8 26%);
+  --btn-fg: color-mix(in srgb, var(--text-primary, #eaeaea) 84%, #8bb8ff 16%);
+}
+
+body.theme-light .left-toolbar__button.is-active {
+  --btn-bg: color-mix(in srgb, rgba(20, 26, 34, 0.06) 76%, #6f9de3 24%);
+  --btn-bg-hover: color-mix(in srgb, rgba(20, 26, 34, 0.1) 72%, #6f9de3 28%);
+  --btn-bg-active: color-mix(in srgb, rgba(20, 26, 34, 0.14) 66%, #6f9de3 34%);
+  --btn-fg: rgba(34, 56, 88, 0.95);
+}
+
+.left-toolbar__boards-panel {
+  top: 50%;
+  left: calc(100% + 10px);
+  right: auto;
+  transform: translateY(-50%);
+}
+
+.top-nav__boards {
+  position: relative;
+  pointer-events: auto;
+}
+
+.top-nav__boards-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 260px;
+  max-width: min(88vw, 340px);
+  padding: 8px;
+  border-radius: var(--floating-surface-radius, 18px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--menu-fg);
+  background: var(--menu-bg);
+  border: 1px solid var(--floating-surface-border, var(--menu-divider));
+  box-shadow: var(--floating-surface-shadow);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 1100;
+}
+
+.top-nav__boards-title {
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--menu-icon);
+  padding: 6px 8px 2px;
+}
+
+.top-nav__boards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.top-nav__boards-row {
+  position: relative;
+}
+
+.top-nav__boards-item {
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 68px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 130ms ease, transform 100ms ease;
+}
+
+.top-nav__boards-item:hover {
+  background: var(--menu-item-hover);
+}
+
+.top-nav__boards-item:active {
+  transform: scale(0.99);
+}
+
+.top-nav__boards-item--editing {
+  cursor: default;
+}
+
+.top-nav__boards-item-name {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.top-nav__boards-item-meta {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--menu-icon);
+}
+
+.top-nav__boards-empty {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--menu-icon);
+}
+
+.top-nav__boards-actions {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.top-nav__boards-edit,
+.top-nav__boards-delete {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--menu-icon);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.top-nav__boards-row:hover .top-nav__boards-edit,
+.top-nav__boards-row:hover .top-nav__boards-delete,
+.top-nav__boards-row:focus-within .top-nav__boards-edit,
+.top-nav__boards-row:focus-within .top-nav__boards-delete {
+  opacity: 0.88;
+}
+
+.top-nav__boards-edit:hover,
+.top-nav__boards-delete:hover {
+  background: var(--menu-item-hover);
+  color: var(--menu-fg);
+}
+
+.top-nav__boards-name-input {
+  width: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--menu-fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 0;
+  margin: 0;
+}
+
+.top-nav__boards-name-input::placeholder {
+  color: var(--menu-icon);
+  opacity: 1;
+}
+
+.top-nav__logo {
+  color: var(--logo-color);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.top-nav__logo-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--logo-color);
+  background: color-mix(in srgb, var(--logo-color) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--logo-color) 20%, transparent);
+}
+
+.top-nav__logo-wordmark {
+  display: inline-flex;
+  align-items: center;
+  font-family: inherit;
+  font-size: 19px;
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+.top-nav__logo-svg {
+  height: 20px;
+  width: auto;
+  color: var(--logo-color);
+  pointer-events: auto;
+  opacity: 0.98;
+}
+
+.top-nav__button {
+  pointer-events: auto;
+  color: var(--nav-fg);
+  opacity: 0.95;
+}
+
+.top-nav__button:hover {
+  opacity: 1;
+}
+
+.top-nav__button--primary {
+  opacity: 0.9;
+  display: inline-flex;
+  align-items: center;
+}
+
+.top-nav__icon-button {
+  pointer-events: auto;
+  color: var(--nav-fg-muted);
+  opacity: 0.94;
+}
+
+.top-nav__icon-button:hover {
+  opacity: 1;
+}
+
+.top-nav__toast {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--toast-fg);
+  background: var(--toast-bg);
+  border: 1px solid var(--toast-border);
+  z-index: 1001;
+  pointer-events: none;
+}
+
+@media (max-width: 900px) {
+  .top-nav {
+    top: 10px;
+    left: 12px;
+    right: 12px;
+  }
+
+  .top-nav__left,
+  .top-nav__right {
+    gap: 6px;
+  }
+
+  .top-nav__logo {
+    gap: 7px;
+  }
+
+  .top-nav__logo-mark {
+    width: 22px;
+    height: 22px;
+  }
+
+  .top-nav__logo-wordmark {
+    font-size: 17px;
+  }
+
+  .left-toolbar {
+    top: auto;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: 50%;
+    transform: translateX(-50%);
+    flex-direction: row;
+    gap: 6px;
+    padding: 8px;
+    max-width: calc(100vw - 24px);
+  }
+
+  .left-toolbar__divider {
+    width: 1px;
+    height: 22px;
+    margin: 0 2px;
+  }
+
+  .left-toolbar__button::after {
+    display: none;
+  }
+
+  .left-toolbar__boards-panel {
+    top: auto;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: min(92vw, 340px);
+  }
+
+  .top-nav__toast {
+    top: 58px;
+    right: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .top-nav {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+  }
+
+  .top-nav__left,
+  .top-nav__right {
+    gap: 4px;
+  }
+
+  .top-nav__logo {
+    gap: 6px;
+  }
+
+  .top-nav__logo-mark {
+    width: 20px;
+    height: 20px;
+    border-radius: 7px;
+  }
+
+  .top-nav__logo-wordmark {
+    font-size: 16px;
+  }
+
+  .top-nav__boards-panel {
+    max-width: min(94vw, 340px);
+  }
+
+  .left-toolbar {
+    bottom: max(8px, env(safe-area-inset-bottom));
+    gap: 4px;
+    padding: 6px;
+    border-radius: 16px;
+  }
+}

@@ -1,0 +1,128 @@
+.btn {
+  --btn-bg: rgba(255, 255, 255, 0.06);
+  --btn-bg-hover: rgba(255, 255, 255, 0.12);
+  --btn-bg-active: rgba(255, 255, 255, 0.18);
+  --btn-fg: rgba(255, 255, 255, 0.94);
+  --btn-shadow-hover: 0 8px 20px rgba(0, 0, 0, 0.18);
+  --btn-focus-ring: rgba(120, 177, 255, 0.8);
+
+  appearance: none;
+  border: 0;
+  border-radius: 26px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  padding: 10px 20px;
+  min-height: 40px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 100ms ease, opacity 160ms ease;
+}
+
+.btn:hover {
+  background: var(--btn-bg-hover);
+  box-shadow: var(--btn-shadow-hover);
+}
+
+.btn:active {
+  background: var(--btn-bg-active);
+  transform: scale(0.98);
+}
+
+.btn:focus {
+  outline: none;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--btn-focus-ring);
+  outline-offset: 2px;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn-primary {
+  --btn-bg: rgba(128, 182, 255, 0.16);
+  --btn-bg-hover: rgba(128, 182, 255, 0.24);
+  --btn-bg-active: rgba(128, 182, 255, 0.32);
+}
+
+.btn-icon {
+  min-width: 42px;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  justify-content: center;
+  display: inline-flex;
+  align-items: center;
+  font-size: 16px;
+}
+
+.btn-menu {
+  width: 100%;
+  justify-content: flex-start;
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 15px;
+}
+
+.btn-danger {
+  --btn-bg: rgba(255, 104, 104, 0.14);
+  --btn-bg-hover: rgba(255, 104, 104, 0.22);
+  --btn-bg-active: rgba(255, 104, 104, 0.3);
+}
+
+body.theme-light .btn {
+  --btn-bg: rgba(20, 26, 34, 0.04);
+  --btn-bg-hover: rgba(20, 26, 34, 0.08);
+  --btn-bg-active: rgba(20, 26, 34, 0.14);
+  --btn-fg: rgba(22, 29, 36, 0.92);
+  --btn-focus-ring: rgba(69, 121, 197, 0.72);
+  --btn-shadow-hover: 0 6px 16px rgba(44, 61, 82, 0.12);
+}
+
+body.theme-dark .btn {
+  --btn-bg: var(--surface-panel, #2a2a2a);
+  --btn-bg-hover: var(--surface-elevated, #333333);
+  --btn-bg-active: color-mix(in srgb, var(--surface-elevated, #333333) 70%, var(--surface-border, #3a3a3a) 30%);
+  --btn-fg: var(--text-primary, #eaeaea);
+  --btn-focus-ring: color-mix(in srgb, var(--text-secondary, #b3b3b3) 72%, #7fb9ff 28%);
+  --btn-shadow-hover: 0 8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.btn__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.btn__icon-svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.btn__label {
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -1,0 +1,874 @@
+.canvas-viewport {
+  --canvas-scale: 1;
+  --canvas-inverse-scale: 1;
+  --transform-border-color: rgba(178, 190, 207, 0.92);
+  --transform-handle-border: rgba(128, 143, 162, 0.78);
+  --transform-handle-fill: rgba(255, 255, 255, 0.98);
+  --transform-handle-hover-fill: rgba(255, 255, 255, 1);
+  --transform-border-size: 1px;
+  --transform-handle-size: 7px;
+  position: fixed;
+  inset: 0;
+  background: var(--canvas-bg, #000);
+  background-image: radial-gradient(var(--canvas-grid-dot, rgba(255, 255, 255, 0.1)) 1px, transparent 1px);
+  background-size: var(--canvas-grid-size, 24px) var(--canvas-grid-size, 24px);
+  overflow: hidden;
+  cursor: default;
+}
+
+.canvas-viewport.is-space-pan-ready {
+  cursor: grab;
+}
+
+.canvas-viewport.is-panning {
+  cursor: grabbing;
+}
+
+.canvas-viewport.is-crop-key-held,
+.canvas-viewport.is-crop-key-held .canvas-image {
+  cursor: url("/knife-cursor.svg") 6 6, crosshair;
+}
+
+.canvas-viewport.is-comment-mode .canvas-image {
+  cursor: crosshair;
+}
+
+.canvas-viewport.is-comment-mode .canvas-image-node {
+  cursor: crosshair;
+}
+
+.canvas-viewport.is-locked .canvas-image,
+.canvas-viewport.is-locked .canvas-image-node,
+.canvas-viewport.is-locked .canvas-selection-outline,
+.canvas-viewport.is-locked .canvas-resize-handle {
+  cursor: default;
+}
+
+.canvas-viewport.is-locked.is-comment-mode .canvas-image,
+.canvas-viewport.is-locked.is-comment-mode .canvas-image-node {
+  cursor: crosshair;
+}
+
+.canvas-camera {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.canvas-world {
+  position: relative;
+}
+
+.canvas-world-origin {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 40px;
+  height: 40px;
+  transform: translate(-50%, -50%);
+  color: var(--nav-fg-muted, rgba(255, 255, 255, 0.84));
+  opacity: 0.2;
+  pointer-events: none;
+}
+
+.canvas-world-origin::before,
+.canvas-world-origin::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+}
+
+.canvas-world-origin::before {
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  transform: translateX(-50%);
+}
+
+.canvas-world-origin::after {
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.canvas-hint {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max-content;
+  max-width: min(90vw, 460px);
+  padding: 0 12px;
+  color: var(--nav-fg-muted, rgba(255, 255, 255, 0.84));
+  font-size: 15px;
+  line-height: 1.6;
+  text-align: center;
+  opacity: 0.6;
+  user-select: none;
+  pointer-events: none;
+}
+
+.canvas-image {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  left: 0;
+  top: 0;
+  object-fit: contain;
+  cursor: grab;
+  user-select: none;
+}
+
+.canvas-image:active {
+  cursor: grabbing;
+}
+
+.canvas-image-node {
+  position: absolute;
+  cursor: grab;
+}
+
+.canvas-image-node:active {
+  cursor: grabbing;
+}
+
+.canvas-selection-outline {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) #4c8dff;
+  z-index: 19;
+}
+
+.canvas-resize-handle {
+  position: absolute;
+  --handle-offset: calc(4px * var(--canvas-inverse-scale));
+  width: calc(12px * var(--canvas-inverse-scale));
+  height: calc(12px * var(--canvas-inverse-scale));
+  border: calc(1px * var(--canvas-inverse-scale)) solid rgba(255, 255, 255, 0.92);
+  background: #4c8dff;
+  transform: translate(-50%, -50%) scale(1);
+  border-radius: calc(2px * var(--canvas-inverse-scale));
+  cursor: nwse-resize;
+  z-index: 20;
+  padding: 0;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+
+.canvas-resize-handle:hover {
+  filter: brightness(1.06);
+}
+
+.canvas-resize-handle.is-nw {
+  cursor: nwse-resize;
+  transform: translate(calc(-50% - var(--handle-offset)), calc(-50% - var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-ne {
+  cursor: nesw-resize;
+  transform: translate(calc(-50% + var(--handle-offset)), calc(-50% - var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-se {
+  cursor: nwse-resize;
+  transform: translate(calc(-50% + var(--handle-offset)), calc(-50% + var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-sw {
+  cursor: nesw-resize;
+  transform: translate(calc(-50% - var(--handle-offset)), calc(-50% + var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-n {
+  cursor: ns-resize;
+  transform: translate(-50%, calc(-50% - var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-s {
+  cursor: ns-resize;
+  transform: translate(-50%, calc(-50% + var(--handle-offset))) scale(1);
+}
+
+.canvas-resize-handle.is-e {
+  cursor: ew-resize;
+  transform: translate(calc(-50% + var(--handle-offset)), -50%) scale(1);
+}
+
+.canvas-resize-handle.is-w {
+  cursor: ew-resize;
+  transform: translate(calc(-50% - var(--handle-offset)), -50%) scale(1);
+}
+
+.canvas-crop-frame {
+  position: absolute;
+  border: calc(var(--transform-border-size) * var(--canvas-inverse-scale)) solid var(--transform-border-color);
+  box-shadow: none;
+  cursor: move;
+  z-index: 24;
+}
+
+.canvas-crop-mask-layer {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 22;
+}
+
+.canvas-crop-mask {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.canvas-crop-mask.is-top {
+  left: 0;
+  top: 0;
+  width: 100%;
+}
+
+.canvas-crop-mask.is-bottom {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+}
+
+.canvas-crop-mask.is-left {
+  left: 0;
+}
+
+.canvas-crop-mask.is-right {
+  right: 0;
+}
+
+.canvas-quick-crop-frame {
+  position: absolute;
+  border: 1px solid rgba(160, 205, 255, 0.95);
+  background: rgba(80, 144, 230, 0.16);
+  pointer-events: none;
+  z-index: 23;
+}
+
+.canvas-crop-handle {
+  position: absolute;
+  width: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+  height: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+  border: calc(var(--transform-border-size) * var(--canvas-inverse-scale)) solid var(--transform-handle-border);
+  background: var(--transform-handle-fill);
+  border-radius: 0;
+  transform: translate(-50%, -50%) scale(1);
+  z-index: 25;
+  padding: 0;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.canvas-crop-handle:hover {
+  background: var(--transform-handle-hover-fill);
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.canvas-crop-handle::before,
+.canvas-crop-handle::after {
+  display: none;
+}
+
+.canvas-crop-handle.is-corner::before,
+.canvas-crop-handle.is-corner::after {
+  display: none;
+}
+
+.canvas-crop-handle.is-n,
+.canvas-crop-handle.is-s {
+  width: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+  height: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+}
+
+.canvas-crop-handle.is-e,
+.canvas-crop-handle.is-w {
+  width: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+  height: calc(var(--transform-handle-size) * var(--canvas-inverse-scale));
+}
+
+.canvas-crop-handle.is-nw,
+.canvas-crop-handle.is-se {
+  cursor: nwse-resize;
+}
+
+.canvas-crop-handle.is-ne,
+.canvas-crop-handle.is-sw {
+  cursor: nesw-resize;
+}
+
+.canvas-crop-handle.is-n,
+.canvas-crop-handle.is-s {
+  cursor: ns-resize;
+}
+
+.canvas-crop-handle.is-e,
+.canvas-crop-handle.is-w {
+  cursor: ew-resize;
+}
+
+body.theme-dark .canvas-viewport {
+  --transform-border-color: rgba(185, 197, 214, 0.88);
+  --transform-handle-border: rgba(134, 149, 169, 0.82);
+  --transform-handle-fill: rgba(255, 255, 255, 0.98);
+  --transform-handle-hover-fill: rgba(255, 255, 255, 1);
+}
+
+body.theme-light .canvas-viewport {
+  --transform-border-color: rgba(102, 117, 137, 0.72);
+  --transform-handle-border: rgba(86, 102, 122, 0.68);
+  --transform-handle-fill: rgba(255, 255, 255, 0.98);
+  --transform-handle-hover-fill: rgba(255, 255, 255, 1);
+}
+
+.canvas-smart-guide {
+  position: absolute;
+  pointer-events: none;
+  z-index: 26;
+  color: var(--nav-fg-muted, rgba(255, 255, 255, 0.84));
+  opacity: 0.55;
+}
+
+.canvas-smart-guide.is-vertical {
+  width: 1px;
+  transform: translateX(-0.5px);
+  background: currentColor;
+}
+
+.canvas-smart-guide.is-horizontal {
+  height: 1px;
+  transform: translateY(-0.5px);
+  background: currentColor;
+}
+
+.canvas-marquee {
+  position: fixed;
+  border: 1px solid rgba(134, 184, 255, 0.8);
+  background: rgba(100, 160, 255, 0.16);
+  pointer-events: none;
+  z-index: 30;
+}
+
+.canvas-context-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 236px;
+  padding: 8px;
+  border-radius: var(--floating-surface-radius, 18px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--menu-fg, #eaeaea);
+  background: var(--menu-bg, #2a2a2a);
+  border: 1px solid var(--floating-surface-border, var(--menu-divider, #3a3a3a));
+  box-shadow: var(--floating-surface-shadow, 0 14px 30px rgba(0, 0, 0, 0.24), 0 4px 10px rgba(0, 0, 0, 0.16));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  transform-origin: top left;
+  animation: canvas-menu-in 0.14s ease-out;
+}
+
+.canvas-context-menu__divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--menu-divider, #3a3a3a);
+}
+
+.canvas-menu-item {
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  min-height: 44px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 130ms ease, transform 100ms ease, color 130ms ease;
+}
+
+.canvas-menu-item:hover {
+  background: var(--menu-item-hover, #333333);
+}
+
+.canvas-menu-item:active {
+  transform: scale(0.985);
+}
+
+.canvas-menu-item.is-disabled,
+.canvas-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.canvas-menu-item.is-disabled:hover,
+.canvas-menu-item:disabled:hover {
+  background: transparent;
+}
+
+.canvas-menu-item:focus {
+  outline: none;
+}
+
+.canvas-menu-item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--menu-focus, rgba(126, 182, 255, 0.82));
+}
+
+.canvas-menu-item__icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--menu-icon, rgba(212, 229, 255, 0.96));
+  flex: 0 0 auto;
+}
+
+.canvas-menu-item__icon svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.canvas-menu-item__label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.canvas-menu-item__badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--menu-badge-fg, rgba(201, 226, 255, 0.95));
+  background: var(--menu-badge-bg, rgba(106, 160, 232, 0.28));
+}
+
+.canvas-menu-item__state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--menu-icon, rgba(212, 229, 255, 0.96));
+  opacity: 0.95;
+  flex: 0 0 auto;
+}
+
+.canvas-menu-item.is-danger {
+  color: var(--menu-danger, rgba(255, 160, 160, 0.96));
+}
+
+.canvas-menu-item.is-danger:hover {
+  background: var(--menu-danger-hover, rgba(255, 93, 93, 0.18));
+}
+
+.canvas-menu-submenu {
+  position: relative;
+  width: 100%;
+}
+
+.canvas-menu-submenu__trigger {
+  position: relative;
+  width: 100%;
+}
+
+.canvas-menu-submenu__chevron {
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.72;
+}
+
+.canvas-menu-submenu::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -8px;
+  width: 8px;
+  height: 100%;
+}
+
+.canvas-menu-submenu__panel {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  min-width: 230px;
+  padding: 8px;
+  border-radius: var(--floating-surface-radius, 18px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--menu-fg, #eaeaea);
+  background: var(--menu-bg, #2a2a2a);
+  border: 1px solid var(--floating-surface-border, var(--menu-divider, #3a3a3a));
+  box-shadow: var(--floating-surface-shadow, 0 14px 30px rgba(0, 0, 0, 0.24), 0 4px 10px rgba(0, 0, 0, 0.16));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 70;
+  opacity: 0;
+  transform: translateX(4px);
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.canvas-menu-submenu:hover .canvas-menu-submenu__panel,
+.canvas-menu-submenu:focus-within .canvas-menu-submenu__panel {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.canvas-menu-submenu__panel .canvas-menu-item {
+  min-height: 40px;
+  padding: 11px 14px;
+}
+
+body.theme-dark .canvas-context-menu {
+  --menu-bg: var(--surface-panel, #2a2a2a);
+  --menu-fg: var(--text-primary, #eaeaea);
+  --menu-item-hover: var(--surface-elevated, #333333);
+  --menu-divider: var(--surface-border, #3a3a3a);
+  --menu-icon: var(--text-secondary, #b3b3b3);
+  --menu-focus: color-mix(in srgb, var(--text-secondary, #b3b3b3) 72%, #7fb9ff 28%);
+  --menu-badge-bg: color-mix(in srgb, var(--surface-elevated, #333333) 80%, #7aa8e8 20%);
+  --menu-badge-fg: var(--text-primary, #eaeaea);
+  --menu-danger: #d98b8b;
+  --menu-danger-hover: color-mix(in srgb, var(--surface-elevated, #333333) 74%, #9e4f4f 26%);
+}
+
+body.theme-light .canvas-context-menu {
+  --menu-bg: rgba(252, 253, 255, 0.93);
+  --menu-fg: rgba(24, 32, 42, 0.96);
+  --menu-item-hover: rgba(28, 38, 50, 0.08);
+  --menu-divider: rgba(34, 48, 64, 0.14);
+  --menu-icon: rgba(42, 58, 76, 0.92);
+  --menu-focus: rgba(68, 122, 201, 0.72);
+  --menu-badge-bg: rgba(84, 132, 201, 0.16);
+  --menu-badge-fg: rgba(48, 76, 119, 0.92);
+  --menu-danger: rgba(170, 52, 52, 0.94);
+  --menu-danger-hover: rgba(189, 70, 70, 0.16);
+}
+
+@keyframes canvas-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.canvas-snapping-indicator {
+  position: fixed;
+  right: 16px;
+  bottom: 56px;
+  border: 1px solid rgba(133, 188, 255, 0.34);
+  background: rgba(35, 64, 94, 0.55);
+  color: rgba(190, 222, 255, 0.95);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.canvas-feedback-indicator {
+  position: fixed;
+  right: 16px;
+  bottom: 88px;
+  border: 1px solid rgba(133, 188, 255, 0.34);
+  background: rgba(35, 64, 94, 0.55);
+  color: rgba(190, 222, 255, 0.95);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.canvas-lock-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 88px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(214, 118, 118, 0.42);
+  background: rgba(88, 38, 38, 0.58);
+  color: rgba(245, 186, 186, 0.96);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 999px;
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow:
+    0 8px 20px rgba(0, 0, 0, 0.26),
+    0 2px 6px rgba(0, 0, 0, 0.18);
+  animation: canvas-lock-toast-in 170ms ease-out;
+  z-index: 60;
+}
+
+.canvas-lock-toast__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.95;
+}
+
+@keyframes canvas-lock-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.canvas-comment-pin {
+  position: absolute;
+  width: calc(22px * var(--canvas-inverse-scale));
+  height: calc(18px * var(--canvas-inverse-scale));
+  transform: translate(-50%, -50%);
+  border: none;
+  background: var(--comment-pin-color, #6f8ba6);
+  color: rgba(255, 255, 255, 0.98);
+  border-radius: calc(8px * var(--canvas-inverse-scale));
+  padding: 0;
+  z-index: 21;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 calc(2px * var(--canvas-inverse-scale)) calc(5px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.2),
+    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.22);
+  transition: transform 110ms ease, box-shadow 130ms ease, filter 130ms ease;
+}
+
+.canvas-comment-pin__glyph {
+  width: calc(10px * var(--canvas-inverse-scale));
+  height: calc(10px * var(--canvas-inverse-scale));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.canvas-comment-pin__glyph svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.canvas-comment-pin__glyph path {
+  fill: currentColor;
+}
+
+.canvas-comment-pin::after {
+  content: "";
+  position: absolute;
+  left: calc(5px * var(--canvas-inverse-scale));
+  bottom: calc(-2px * var(--canvas-inverse-scale));
+  width: calc(6px * var(--canvas-inverse-scale));
+  height: calc(6px * var(--canvas-inverse-scale));
+  border-radius: calc(2px * var(--canvas-inverse-scale));
+  transform: rotate(45deg);
+  background: inherit;
+  pointer-events: none;
+}
+
+.canvas-comment-pin:hover,
+.canvas-comment-pin.is-active {
+  transform: translate(-50%, -50%) scale(1.04);
+  filter: brightness(1.08);
+  box-shadow:
+    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.24),
+    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34);
+}
+
+.canvas-comment-pin.is-active {
+  box-shadow:
+    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.24),
+    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34),
+    0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.68);
+}
+
+.canvas-comment-pin.is-draft {
+  filter: saturate(0.92);
+  opacity: 0.95;
+}
+
+.canvas-comment-editor {
+  position: fixed;
+  width: min(272px, calc(100vw - 24px));
+  padding: 8px;
+  border-radius: 24px;
+  border: 0;
+  color: var(--menu-fg, rgba(245, 248, 252, 0.96));
+  --comment-input-fg: var(--menu-fg, rgba(245, 248, 252, 0.96));
+  --comment-input-placeholder: var(--menu-icon, rgba(212, 229, 255, 0.96));
+  --comment-input-caret: var(--menu-fg, rgba(245, 248, 252, 0.96));
+  --comment-footer-divider: var(--menu-divider, rgba(255, 255, 255, 0.1));
+  --comment-send-bg: rgba(112, 165, 246, 0.22);
+  --comment-send-bg-hover: rgba(112, 165, 246, 0.3);
+  --comment-send-bg-active: rgba(112, 165, 246, 0.4);
+  background: var(--menu-bg, rgba(20, 24, 29, 0.9));
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.24),
+    0 4px 10px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  overflow: hidden;
+  z-index: 42;
+  animation: canvas-menu-in 0.14s ease-out;
+  transition: box-shadow 120ms ease, border-color 120ms ease;
+  transform-origin: top left;
+}
+
+.canvas-comment-editor:focus-within {
+  border-color: color-mix(in srgb, var(--menu-fg, rgba(245, 248, 252, 0.96)) 26%, var(--menu-divider, rgba(255, 255, 255, 0.1)) 74%);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.24),
+    0 4px 10px rgba(0, 0, 0, 0.16),
+    0 0 0 1px color-mix(in srgb, var(--menu-fg, rgba(245, 248, 252, 0.96)) 18%, transparent);
+}
+
+.canvas-comment-editor__input {
+  width: 100%;
+  min-height: 96px;
+  max-height: 216px;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--comment-input-fg);
+  caret-color: var(--comment-input-caret);
+  opacity: 1;
+  appearance: none;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
+.canvas-comment-editor__input::placeholder {
+  color: var(--comment-input-placeholder);
+  opacity: 1;
+}
+
+.canvas-comment-editor__input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.canvas-comment-editor__footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--comment-footer-divider);
+}
+
+.canvas-comment-editor__icon-btn {
+  position: static;
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  border-radius: 999px;
+  --btn-bg: rgba(255, 255, 255, 0.04);
+  --btn-bg-hover: rgba(255, 255, 255, 0.1);
+  --btn-bg-active: rgba(255, 255, 255, 0.16);
+  --btn-shadow-hover: none;
+}
+
+.canvas-comment-editor__save-state {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: var(--menu-icon, rgba(212, 229, 255, 0.96));
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
+  margin-right: auto;
+}
+
+.canvas-comment-editor__save-state.is-visible {
+  opacity: 0.9;
+  transform: translateY(0);
+}
+
+.canvas-comment-editor__send-btn {
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  border-radius: 999px;
+  --btn-bg: var(--comment-send-bg);
+  --btn-bg-hover: var(--comment-send-bg-hover);
+  --btn-bg-active: var(--comment-send-bg-active);
+  --btn-shadow-hover: none;
+}
+
+.canvas-comment-editor__send-btn svg {
+  transform: translateX(1px);
+}
+
+body.theme-dark .canvas-comment-editor {
+  --comment-send-bg: color-mix(in srgb, var(--surface-elevated, #333333) 82%, #7aa8e8 18%);
+  --comment-send-bg-hover: color-mix(in srgb, var(--surface-elevated, #333333) 74%, #7aa8e8 26%);
+  --comment-send-bg-active: color-mix(in srgb, var(--surface-elevated, #333333) 66%, #7aa8e8 34%);
+}
+
+body.theme-light .canvas-comment-editor {
+  --comment-send-bg: rgba(84, 133, 206, 0.2);
+  --comment-send-bg-hover: rgba(84, 133, 206, 0.28);
+  --comment-send-bg-active: rgba(84, 133, 206, 0.36);
+}
+
+.canvas-comment-editor__icon-btn.is-danger {
+  --btn-bg: rgba(255, 104, 104, 0.12);
+  --btn-bg-hover: rgba(255, 104, 104, 0.2);
+  --btn-bg-active: rgba(255, 104, 104, 0.28);
+}
+
+body.theme-light .canvas-comment-editor__icon-btn {
+  --btn-bg: rgba(20, 26, 34, 0.05);
+  --btn-bg-hover: rgba(20, 26, 34, 0.11);
+  --btn-bg-active: rgba(20, 26, 34, 0.16);
+}
+
+body.theme-light .canvas-comment-pin {
+  box-shadow:
+    0 calc(2px * var(--canvas-inverse-scale)) calc(5px * var(--canvas-inverse-scale)) rgba(45, 65, 90, 0.22),
+    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34);
+}
+
+body.theme-light .canvas-comment-pin.is-active {
+  box-shadow:
+    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(45, 65, 90, 0.24),
+    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.45),
+    0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(36, 61, 96, 0.46);
+}
+
+body.theme-light .canvas-comment-editor__input {
+  background: transparent;
+}

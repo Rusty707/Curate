@@ -1,0 +1,390 @@
+import { useEffect, useRef, useState } from 'react'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, Sun, Trash2, Unlock } from 'lucide-react'
+import { Board } from './pages/Board'
+import { generateBoardId } from './utils/id'
+import './App.css'
+
+const NAV_ICON_SIZE = 20
+const ICON_STROKE_WIDTH = 2.3
+const RECENT_BOARDS_KEY = 'kanvaref-recent-boards'
+const MAX_RECENT_BOARDS = 12
+
+function normalizeRecentBoards(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => ({
+      id: typeof item?.id === 'string' ? item.id : '',
+      lastOpenedAt: typeof item?.lastOpenedAt === 'number' ? item.lastOpenedAt : 0,
+      name: typeof item?.name === 'string' ? item.name.trim().slice(0, 80) : '',
+    }))
+    .filter((item) => item.id)
+    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
+    .slice(0, MAX_RECENT_BOARDS)
+}
+
+function getBoardIdFromPath(pathname) {
+  if (!pathname.startsWith('/board/')) return null
+  const id = pathname.slice('/board/'.length).split('/')[0]
+  return id || null
+}
+
+function formatBoardName(id) {
+  return `Board ${id.slice(0, 8).toUpperCase()}`
+}
+
+function getBoardDisplayName(board) {
+  return board.name || formatBoardName(board.id)
+}
+
+function LogoIcon() {
+  return (
+    <span className="top-nav__logo" aria-label="Curate">
+      <span className="top-nav__logo-mark" aria-hidden="true">
+        <Grid2x2 size={15} strokeWidth={2.1} />
+      </span>
+      <span className="top-nav__logo-wordmark">Curate</span>
+    </span>
+  )
+}
+
+function RedirectToNewBoard() {
+  // Create a new board id when landing on root.
+  const boardId = generateBoardId()
+
+  return <Navigate to={`/board/${boardId}`} replace />
+}
+
+function App() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [copied, setCopied] = useState(false)
+  const [theme, setTheme] = useState(() => localStorage.getItem('kanvaref-theme') || 'dark')
+  const [isBoardsOpen, setIsBoardsOpen] = useState(false)
+  const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false })
+  const [editingBoardId, setEditingBoardId] = useState(null)
+  const [editingBoardName, setEditingBoardName] = useState('')
+  const [recentBoards, setRecentBoards] = useState(() => {
+    try {
+      return normalizeRecentBoards(JSON.parse(localStorage.getItem(RECENT_BOARDS_KEY) || '[]'))
+    } catch {
+      return []
+    }
+  })
+  const boardsPanelRef = useRef(null)
+
+  const currentBoardId = getBoardIdFromPath(location.pathname)
+  const isBoardRoute = Boolean(currentBoardId)
+
+  useEffect(() => {
+    if (!copied) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setCopied(false)
+    }, 1500)
+
+    return () => window.clearTimeout(timer)
+  }, [copied])
+
+  useEffect(() => {
+    document.body.classList.toggle('theme-light', theme === 'light')
+    document.body.classList.toggle('theme-dark', theme !== 'light')
+    localStorage.setItem('kanvaref-theme', theme)
+  }, [theme])
+
+  useEffect(() => {
+    if (!currentBoardId) return
+    const now = Date.now()
+    setRecentBoards((prev) => {
+      const existing = prev.find((entry) => entry.id === currentBoardId)
+      return normalizeRecentBoards([
+        { id: currentBoardId, lastOpenedAt: now, name: existing?.name || '' },
+        ...prev.filter((entry) => entry.id !== currentBoardId),
+      ])
+    })
+  }, [currentBoardId])
+
+  useEffect(() => {
+    localStorage.setItem(RECENT_BOARDS_KEY, JSON.stringify(recentBoards))
+  }, [recentBoards])
+
+  useEffect(() => {
+    if (!isBoardsOpen) return
+    function handleOutsideClick(event) {
+      if (boardsPanelRef.current?.contains(event.target)) return
+      if (editingBoardId) {
+        const trimmedName = editingBoardName.trim()
+        if (trimmedName) {
+          setRecentBoards((prev) =>
+            normalizeRecentBoards(prev.map((entry) => (entry.id === editingBoardId ? { ...entry, name: trimmedName } : entry))),
+          )
+        }
+        setEditingBoardId(null)
+        setEditingBoardName('')
+      }
+      setIsBoardsOpen(false)
+    }
+    function handleEscape(event) {
+      if (event.key !== 'Escape') return
+      if (editingBoardId) {
+        setEditingBoardId(null)
+        setEditingBoardName('')
+        return
+      }
+      setIsBoardsOpen(false)
+    }
+    window.addEventListener('mousedown', handleOutsideClick)
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('mousedown', handleOutsideClick)
+      window.removeEventListener('keydown', handleEscape)
+    }
+  }, [editingBoardId, editingBoardName, isBoardsOpen])
+
+  useEffect(() => {
+    function handleCanvasToolbarState(event) {
+      const detail = event.detail && typeof event.detail === 'object' ? event.detail : {}
+      setCanvasToolbarState({
+        isCommentMode: Boolean(detail.isCommentMode),
+        isCanvasLocked: Boolean(detail.isCanvasLocked),
+      })
+    }
+    window.addEventListener('kanvaref:toolbar-state', handleCanvasToolbarState)
+    return () => window.removeEventListener('kanvaref:toolbar-state', handleCanvasToolbarState)
+  }, [])
+
+  async function handleShare() {
+    if (!isBoardRoute) {
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  function handleNewBoard() {
+    const nextBoardUrl = `/board/${generateBoardId()}`
+    window.open(nextBoardUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  function handleOpenBoard(boardId) {
+    navigate(`/board/${boardId}`)
+    setIsBoardsOpen(false)
+  }
+
+  function handleDeleteBoardFromRecents(event, boardId) {
+    event.preventDefault()
+    event.stopPropagation()
+    const confirmed = window.confirm('Remove this board from your recent list and local data?')
+    if (!confirmed) return
+    localStorage.removeItem(`kanvaref-board-${boardId}`)
+    localStorage.removeItem(`kanvaref-board-snap-${boardId}`)
+    localStorage.removeItem(`kanvaref-board-snap-images-${boardId}`)
+    setRecentBoards((prev) => prev.filter((entry) => entry.id !== boardId))
+    if (editingBoardId === boardId) {
+      setEditingBoardId(null)
+      setEditingBoardName('')
+    }
+    if (boardId === currentBoardId) {
+      const nextBoardId = generateBoardId()
+      navigate(`/board/${nextBoardId}`, { replace: true })
+    }
+  }
+
+  function handleStartRename(event, board) {
+    event.preventDefault()
+    event.stopPropagation()
+    setEditingBoardId(board.id)
+    setEditingBoardName(getBoardDisplayName(board))
+  }
+
+  function handleCancelRename() {
+    setEditingBoardId(null)
+    setEditingBoardName('')
+  }
+
+  function handleCommitRename(boardId, rawValue) {
+    const trimmedName = rawValue.trim()
+    if (!trimmedName) {
+      handleCancelRename()
+      return
+    }
+    setRecentBoards((prev) =>
+      normalizeRecentBoards(prev.map((entry) => (entry.id === boardId ? { ...entry, name: trimmedName } : entry))),
+    )
+    setEditingBoardId(null)
+    setEditingBoardName('')
+  }
+
+  function handleToggleTheme() {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
+  }
+
+  function dispatchCanvasToolbarAction(action) {
+    window.dispatchEvent(new CustomEvent('kanvaref:toolbar-action', { detail: { action } }))
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="top-nav">
+        <div className="top-nav__left">
+          <LogoIcon />
+        </div>
+        <div className="top-nav__right">
+          <button type="button" className="btn btn-icon top-nav__icon-button" onClick={handleToggleTheme}>
+            {theme === 'light' ? <Sun size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /> : <Moon size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />}
+          </button>
+          <button
+            type="button"
+            className="btn btn-icon top-nav__button"
+            onClick={handleShare}
+            aria-label="Share board"
+            title="Share board"
+          >
+            <span className="btn__icon" aria-hidden="true"><Link size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+            <span className="visually-hidden">Share</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="left-toolbar" ref={boardsPanelRef}>
+        <button
+          type="button"
+          className="btn btn-icon left-toolbar__button"
+          onClick={handleNewBoard}
+          aria-label="New board"
+          data-tooltip="New Board"
+        >
+          <span className="btn__icon" aria-hidden="true"><Plus size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+        </button>
+        <div className="left-toolbar__boards">
+          <button
+            type="button"
+            className="btn btn-icon left-toolbar__button"
+            onClick={() => setIsBoardsOpen((prev) => !prev)}
+            aria-label="Boards"
+            aria-expanded={isBoardsOpen}
+            data-tooltip="Boards"
+          >
+            <span className="btn__icon" aria-hidden="true"><Grid2x2 size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+          </button>
+
+          {isBoardsOpen ? (
+            <div className="top-nav__boards-panel left-toolbar__boards-panel">
+              <div className="top-nav__boards-title">Your Boards</div>
+              {recentBoards.length > 0 ? (
+                <div className="top-nav__boards-list">
+                  {recentBoards.map((board) => (
+                    <div key={board.id} className="top-nav__boards-row">
+                      {editingBoardId === board.id ? (
+                        <div className="top-nav__boards-item top-nav__boards-item--editing">
+                          <input
+                            className="top-nav__boards-name-input"
+                            value={editingBoardName}
+                            onChange={(event) => setEditingBoardName(event.target.value)}
+                            onBlur={() => handleCommitRename(board.id, editingBoardName)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                handleCommitRename(board.id, editingBoardName)
+                              } else if (event.key === 'Escape') {
+                                event.preventDefault()
+                                handleCancelRename()
+                              }
+                            }}
+                            maxLength={80}
+                            autoFocus
+                          />
+                          <span className="top-nav__boards-item-meta">{new Date(board.lastOpenedAt).toLocaleString()}</span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="top-nav__boards-item"
+                          onClick={() => handleOpenBoard(board.id)}
+                        >
+                          <span className="top-nav__boards-item-name">{getBoardDisplayName(board)}</span>
+                          <span className="top-nav__boards-item-meta">{new Date(board.lastOpenedAt).toLocaleString()}</span>
+                        </button>
+                      )}
+                      <div className="top-nav__boards-actions">
+                        <button
+                          type="button"
+                          className="top-nav__boards-edit"
+                          onClick={(event) => handleStartRename(event, board)}
+                          aria-label="Rename board"
+                          title="Rename board"
+                        >
+                          <Pencil size={13} strokeWidth={ICON_STROKE_WIDTH} />
+                        </button>
+                        <button
+                          type="button"
+                          className="top-nav__boards-delete"
+                          onClick={(event) => handleDeleteBoardFromRecents(event, board.id)}
+                          aria-label="Delete board"
+                          title="Delete board"
+                        >
+                          <Trash2 size={14} strokeWidth={ICON_STROKE_WIDTH} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="top-nav__boards-empty">No boards yet</div>
+              )}
+            </div>
+          ) : null}
+        </div>
+        <div className="left-toolbar__divider" />
+        <button
+          type="button"
+          className={`btn btn-icon left-toolbar__button ${canvasToolbarState.isCommentMode ? 'is-active' : ''}`.trim()}
+          onClick={() => dispatchCanvasToolbarAction('toggle-comment')}
+          aria-label={canvasToolbarState.isCommentMode ? 'Disable comment mode' : 'Enable comment mode'}
+          data-tooltip={canvasToolbarState.isCommentMode ? 'Disable Comments' : 'Enable Comments'}
+        >
+          <span className="btn__icon" aria-hidden="true"><MessageSquare size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+        </button>
+        <button
+          type="button"
+          className={`btn btn-icon left-toolbar__button ${canvasToolbarState.isCanvasLocked ? 'is-active' : ''}`.trim()}
+          onClick={() => dispatchCanvasToolbarAction('toggle-lock')}
+          aria-label={canvasToolbarState.isCanvasLocked ? 'Unlock canvas' : 'Lock canvas'}
+          data-tooltip={canvasToolbarState.isCanvasLocked ? 'Unlock Canvas' : 'Lock Canvas'}
+        >
+          <span className="btn__icon" aria-hidden="true">
+            {canvasToolbarState.isCanvasLocked
+              ? <Lock size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+              : <Unlock size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="btn btn-icon left-toolbar__button"
+          onClick={() => dispatchCanvasToolbarAction('reset-view')}
+          aria-label="Reset view"
+          data-tooltip="Reset View"
+        >
+          <span className="btn__icon" aria-hidden="true"><RotateCcw size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+        </button>
+      </div>
+
+      {copied ? <div className="top-nav__toast">Link copied</div> : null}
+
+      <Routes>
+        <Route path="/" element={<RedirectToNewBoard />} />
+        <Route path="/board/:id" element={<Board />} />
+      </Routes>
+    </div>
+  )
+}
+
+export default App
+
