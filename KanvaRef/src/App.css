@@ -109,12 +109,36 @@ body.theme-light {
 
 .left-toolbar__button {
   position: relative;
+  border: 0;
+  min-width: 42px;
+  width: 42px;
+  height: 42px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
   color: var(--nav-fg);
-  transition: transform 110ms ease;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease;
 }
 
 .left-toolbar__button:hover {
-  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--menu-item-hover) 86%, transparent);
+}
+
+.left-toolbar__button:active {
+  background: color-mix(in srgb, var(--menu-item-hover) 96%, transparent);
+}
+
+.left-toolbar__button:focus {
+  outline: none;
+}
+
+.left-toolbar__button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--menu-icon) 60%, #7fb9ff 40%);
+  outline-offset: 2px;
 }
 
 .left-toolbar__button::after {
@@ -144,17 +168,70 @@ body.theme-light {
 }
 
 .left-toolbar__button.is-active {
-  --btn-bg: color-mix(in srgb, var(--surface-panel, #2a2a2a) 86%, #7aa8e8 14%);
-  --btn-bg-hover: color-mix(in srgb, var(--surface-elevated, #333333) 80%, #7aa8e8 20%);
-  --btn-bg-active: color-mix(in srgb, var(--surface-elevated, #333333) 74%, #7aa8e8 26%);
-  --btn-fg: color-mix(in srgb, var(--text-primary, #eaeaea) 84%, #8bb8ff 16%);
+  color: color-mix(in srgb, var(--text-primary, #eaeaea) 84%, #8bb8ff 16%);
+  background: color-mix(in srgb, var(--menu-item-hover) 88%, transparent);
 }
 
 body.theme-light .left-toolbar__button.is-active {
-  --btn-bg: color-mix(in srgb, rgba(20, 26, 34, 0.06) 76%, #6f9de3 24%);
-  --btn-bg-hover: color-mix(in srgb, rgba(20, 26, 34, 0.1) 72%, #6f9de3 28%);
-  --btn-bg-active: color-mix(in srgb, rgba(20, 26, 34, 0.14) 66%, #6f9de3 34%);
-  --btn-fg: rgba(34, 56, 88, 0.95);
+  color: rgba(34, 56, 88, 0.95);
+  background: color-mix(in srgb, rgba(20, 26, 34, 0.08) 88%, transparent);
+}
+
+.left-toolbar__mode-indicator {
+  position: relative;
+}
+
+.left-toolbar__button--comment.is-comment-active {
+  color: #2563eb;
+  background: color-mix(in srgb, #2563eb 18%, transparent);
+}
+
+body.theme-light .left-toolbar__button--comment.is-comment-active {
+  background: color-mix(in srgb, #2563eb 14%, transparent);
+}
+
+.left-toolbar__button--lock.is-locked-active {
+  color: #ff0000;
+  background: color-mix(in srgb, #ff0000 14%, transparent);
+}
+
+body.theme-light .left-toolbar__button--lock.is-locked-active {
+  background: color-mix(in srgb, #ff0000 10%, transparent);
+}
+
+.left-toolbar__button--cluster.is-cluster-active {
+  color: #c18f2f;
+  background: color-mix(in srgb, #c18f2f 16%, transparent);
+}
+
+body.theme-light .left-toolbar__button--cluster.is-cluster-active {
+  color: #8a661f;
+  background: color-mix(in srgb, #c18f2f 12%, transparent);
+}
+
+.left-toolbar__mode-badge {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid color-mix(in srgb, #93c5fd 62%, transparent);
+  background: #1d4ed8;
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  padding: 6px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+  z-index: 1200;
+}
+
+.left-toolbar__mode-badge--cluster {
+  border-color: color-mix(in srgb, #e9d39f 62%, transparent);
+  background: #8a661f;
 }
 
 .left-toolbar__boards-panel {
@@ -451,6 +528,13 @@ body.theme-light .left-toolbar__button.is-active {
     display: none;
   }
 
+  .left-toolbar__mode-badge {
+    left: 50%;
+    top: auto;
+    bottom: calc(100% + 8px);
+    transform: translateX(-50%);
+  }
+
   .left-toolbar__boards-panel {
     top: auto;
     bottom: calc(100% + 10px);
@@ -503,3 +587,5 @@ body.theme-light .left-toolbar__button.is-active {
     border-radius: 16px;
   }
 }
+
+

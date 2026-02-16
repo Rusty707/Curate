@@ -14,6 +14,7 @@
   background-size: var(--canvas-grid-size, 24px) var(--canvas-grid-size, 24px);
   overflow: hidden;
   cursor: default;
+  transition: box-shadow 180ms ease, background-color 180ms ease;
 }
 
 .canvas-viewport.is-space-pan-ready {
@@ -29,24 +30,36 @@
   cursor: url("/knife-cursor.svg") 6 6, crosshair;
 }
 
-.canvas-viewport.is-comment-mode .canvas-image {
+.canvas-viewport.is-comment-mode:not(.is-locked) {
   cursor: crosshair;
 }
 
-.canvas-viewport.is-comment-mode .canvas-image-node {
+.canvas-viewport.is-comment-mode:not(.is-locked) .canvas-image {
   cursor: crosshair;
+}
+
+.canvas-viewport.is-comment-mode:not(.is-locked) .canvas-image-node {
+  cursor: crosshair;
+}
+
+.canvas-viewport.is-cluster-mode:not(.is-locked):not(.is-comment-mode) {
+  cursor: crosshair;
+}
+
+.canvas-viewport.is-locked {
+  cursor: not-allowed;
 }
 
 .canvas-viewport.is-locked .canvas-image,
 .canvas-viewport.is-locked .canvas-image-node,
 .canvas-viewport.is-locked .canvas-selection-outline,
 .canvas-viewport.is-locked .canvas-resize-handle {
-  cursor: default;
+  cursor: not-allowed;
 }
 
 .canvas-viewport.is-locked.is-comment-mode .canvas-image,
 .canvas-viewport.is-locked.is-comment-mode .canvas-image-node {
-  cursor: crosshair;
+  cursor: not-allowed;
 }
 
 .canvas-camera {
@@ -57,6 +70,184 @@
 
 .canvas-world {
   position: relative;
+}
+
+.canvas-cluster {
+  position: absolute;
+  border: calc(1px * var(--canvas-inverse-scale)) solid color-mix(in srgb, var(--nav-fg-muted, rgba(255, 255, 255, 0.84)) 34%, transparent);
+  background: color-mix(in srgb, var(--nav-fg-muted, rgba(255, 255, 255, 0.84)) 4%, transparent);
+  border-radius: calc(12px * var(--canvas-inverse-scale));
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  z-index: 8;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.canvas-cluster:hover {
+  border-color: color-mix(in srgb, var(--nav-fg, rgba(255, 255, 255, 0.95)) 44%, transparent);
+  background: color-mix(in srgb, var(--nav-fg-muted, rgba(255, 255, 255, 0.84)) 7%, transparent);
+}
+
+.canvas-cluster.is-selected {
+  border-color: color-mix(in srgb, #4c8dff 68%, transparent);
+  background: color-mix(in srgb, #4c8dff 10%, transparent);
+}
+
+.canvas-cluster:active {
+  cursor: grabbing;
+}
+
+.canvas-cluster__title {
+  border: 0;
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: calc(12px * var(--canvas-inverse-scale));
+  font-weight: 620;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--nav-fg) 78%, transparent);
+  pointer-events: auto;
+  user-select: none;
+  cursor: text;
+}
+
+.canvas-cluster__header {
+  position: absolute;
+  top: calc(5px * var(--canvas-inverse-scale));
+  left: calc(7px * var(--canvas-inverse-scale));
+  right: calc(7px * var(--canvas-inverse-scale));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(4px * var(--canvas-inverse-scale));
+  transition: background-color 160ms ease;
+}
+
+.canvas-cluster:hover .canvas-cluster__header {
+  background: color-mix(in srgb, var(--menu-item-hover, rgba(255, 255, 255, 0.08)) 70%, transparent);
+  border-radius: calc(8px * var(--canvas-inverse-scale));
+}
+
+.canvas-cluster__title-wrap {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4px * var(--canvas-inverse-scale));
+}
+
+.canvas-cluster__title-wrap .canvas-cluster__title {
+  max-width: calc(100% - (22px * var(--canvas-inverse-scale)));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.canvas-cluster__edit-btn {
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--nav-fg) 72%, transparent);
+  width: calc(18px * var(--canvas-inverse-scale));
+  height: calc(18px * var(--canvas-inverse-scale));
+  border-radius: calc(6px * var(--canvas-inverse-scale));
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: text;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease, background-color 150ms ease;
+}
+
+.canvas-cluster:hover .canvas-cluster__edit-btn {
+  opacity: 0.7;
+  pointer-events: auto;
+}
+
+.canvas-cluster__edit-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--menu-item-hover, rgba(255, 255, 255, 0.08)) 84%, transparent);
+}
+
+.canvas-cluster__title-input {
+  width: calc(160px * var(--canvas-inverse-scale));
+  max-width: calc(100% - (16px * var(--canvas-inverse-scale)));
+  font: inherit;
+  font-size: calc(12px * var(--canvas-inverse-scale));
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--nav-fg) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--nav-fg-muted, rgba(255, 255, 255, 0.84)) 34%, transparent);
+  border-radius: calc(6px * var(--canvas-inverse-scale));
+  background: color-mix(in srgb, var(--menu-bg, rgba(0, 0, 0, 0.2)) 84%, transparent);
+  padding: calc(2px * var(--canvas-inverse-scale)) calc(6px * var(--canvas-inverse-scale));
+  transition: background-color 150ms ease, border-color 150ms ease;
+  outline: none;
+}
+
+.canvas-cluster__title-input:focus {
+  border-color: color-mix(in srgb, var(--nav-fg) 44%, transparent);
+}
+
+.canvas-cluster__menu-toggle {
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--nav-fg) 70%, transparent);
+  width: calc(28px * var(--canvas-inverse-scale));
+  height: calc(28px * var(--canvas-inverse-scale));
+  border-radius: calc(6px * var(--canvas-inverse-scale));
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.canvas-cluster__menu-toggle:hover {
+  background: color-mix(in srgb, var(--menu-item-hover, rgba(255, 255, 255, 0.08)) 84%, transparent);
+}
+
+.canvas-cluster__menu {
+  position: absolute;
+  top: calc(20px * var(--canvas-inverse-scale));
+  right: 0;
+  min-width: calc(118px * var(--canvas-inverse-scale));
+  border: calc(1px * var(--canvas-inverse-scale)) solid color-mix(in srgb, var(--menu-divider, rgba(255, 255, 255, 0.14)) 86%, transparent);
+  border-radius: calc(10px * var(--canvas-inverse-scale));
+  background: color-mix(in srgb, var(--menu-bg, rgba(20, 24, 29, 0.9)) 92%, transparent);
+  box-shadow: 0 calc(8px * var(--canvas-inverse-scale)) calc(24px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.2);
+  padding: calc(4px * var(--canvas-inverse-scale));
+  z-index: 15;
+}
+
+.canvas-cluster__menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--menu-fg, var(--nav-fg)) 96%, transparent);
+  border-radius: calc(7px * var(--canvas-inverse-scale));
+  font: inherit;
+  font-size: calc(11px * var(--canvas-inverse-scale));
+  line-height: 1.3;
+  text-align: left;
+  padding: calc(5px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale));
+  cursor: pointer;
+}
+
+.canvas-cluster__menu-item:hover {
+  background: color-mix(in srgb, var(--menu-item-hover, rgba(255, 255, 255, 0.08)) 86%, transparent);
+}
+
+.canvas-cluster--draft {
+  border-style: dashed;
+  cursor: crosshair;
+  pointer-events: none;
 }
 
 .canvas-world-origin {
@@ -316,6 +507,13 @@ body.theme-dark .canvas-viewport {
   --transform-handle-border: rgba(134, 149, 169, 0.82);
   --transform-handle-fill: rgba(255, 255, 255, 0.98);
   --transform-handle-hover-fill: rgba(255, 255, 255, 1);
+  --comment-pin-bg: #5d6776;
+  --comment-pin-shadow-1: rgba(5, 10, 18, 0.2);
+  --comment-pin-shadow-2: rgba(5, 10, 18, 0.14);
+  --comment-pin-shadow-1-hover: rgba(5, 10, 18, 0.24);
+  --comment-pin-shadow-2-hover: rgba(5, 10, 18, 0.18);
+  --comment-pin-ring-1: rgba(37, 99, 235, 0.34);
+  --comment-pin-ring-2: rgba(37, 99, 235, 0.12);
 }
 
 body.theme-light .canvas-viewport {
@@ -323,6 +521,13 @@ body.theme-light .canvas-viewport {
   --transform-handle-border: rgba(86, 102, 122, 0.68);
   --transform-handle-fill: rgba(255, 255, 255, 0.98);
   --transform-handle-hover-fill: rgba(255, 255, 255, 1);
+  --comment-pin-bg: #55657a;
+  --comment-pin-shadow-1: rgba(31, 48, 70, 0.2);
+  --comment-pin-shadow-2: rgba(31, 48, 70, 0.14);
+  --comment-pin-shadow-1-hover: rgba(31, 48, 70, 0.22);
+  --comment-pin-shadow-2-hover: rgba(31, 48, 70, 0.16);
+  --comment-pin-ring-1: rgba(37, 99, 235, 0.3);
+  --comment-pin-ring-2: rgba(37, 99, 235, 0.1);
 }
 
 .canvas-smart-guide {
@@ -640,76 +845,52 @@ body.theme-light .canvas-context-menu {
 
 .canvas-comment-pin {
   position: absolute;
-  width: calc(22px * var(--canvas-inverse-scale));
-  height: calc(18px * var(--canvas-inverse-scale));
+  width: calc(20px * var(--canvas-inverse-scale));
+  height: calc(14px * var(--canvas-inverse-scale));
   transform: translate(-50%, -50%);
   border: none;
-  background: var(--comment-pin-color, #6f8ba6);
-  color: rgba(255, 255, 255, 0.98);
-  border-radius: calc(8px * var(--canvas-inverse-scale));
+  background: var(--comment-pin-bg, #5d6776);
+  border-radius: calc(7px * var(--canvas-inverse-scale));
   padding: 0;
   z-index: 21;
   cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(255, 255, 255, 0.96);
   box-shadow:
-    0 calc(2px * var(--canvas-inverse-scale)) calc(5px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.2),
-    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.22);
-  transition: transform 110ms ease, box-shadow 130ms ease, filter 130ms ease;
-}
-
-.canvas-comment-pin__glyph {
-  width: calc(10px * var(--canvas-inverse-scale));
-  height: calc(10px * var(--canvas-inverse-scale));
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.canvas-comment-pin__glyph svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.canvas-comment-pin__glyph path {
-  fill: currentColor;
+    0 calc(1px * var(--canvas-inverse-scale)) calc(4px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-1, rgba(5, 10, 18, 0.2)),
+    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-2, rgba(5, 10, 18, 0.14));
+  transition: transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease, opacity 180ms ease;
 }
 
 .canvas-comment-pin::after {
   content: "";
   position: absolute;
   left: calc(5px * var(--canvas-inverse-scale));
-  bottom: calc(-2px * var(--canvas-inverse-scale));
-  width: calc(6px * var(--canvas-inverse-scale));
-  height: calc(6px * var(--canvas-inverse-scale));
+  bottom: calc(-3px * var(--canvas-inverse-scale));
+  width: calc(7px * var(--canvas-inverse-scale));
+  height: calc(7px * var(--canvas-inverse-scale));
   border-radius: calc(2px * var(--canvas-inverse-scale));
-  transform: rotate(45deg);
+  transform: rotate(38deg);
   background: inherit;
   pointer-events: none;
 }
 
 .canvas-comment-pin:hover,
 .canvas-comment-pin.is-active {
-  transform: translate(-50%, -50%) scale(1.04);
-  filter: brightness(1.08);
+  transform: translate(-50%, -50%) scale(1.02);
   box-shadow:
-    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.24),
-    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34);
+    0 calc(2px * var(--canvas-inverse-scale)) calc(6px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-1-hover, rgba(5, 10, 18, 0.24)),
+    0 calc(5px * var(--canvas-inverse-scale)) calc(12px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-2-hover, rgba(5, 10, 18, 0.18));
 }
 
 .canvas-comment-pin.is-active {
   box-shadow:
-    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(0, 0, 0, 0.24),
-    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34),
-    0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.68);
+    0 calc(2px * var(--canvas-inverse-scale)) calc(6px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-1-hover, rgba(5, 10, 18, 0.24)),
+    0 calc(5px * var(--canvas-inverse-scale)) calc(12px * var(--canvas-inverse-scale)) var(--comment-pin-shadow-2-hover, rgba(5, 10, 18, 0.18)),
+    0 0 0 calc(1px * var(--canvas-inverse-scale)) var(--comment-pin-ring-1, rgba(37, 99, 235, 0.34)),
+    0 0 0 calc(4px * var(--canvas-inverse-scale)) var(--comment-pin-ring-2, rgba(37, 99, 235, 0.12));
 }
 
 .canvas-comment-pin.is-draft {
-  filter: saturate(0.92);
-  opacity: 0.95;
+  opacity: 0.82;
 }
 
 .canvas-comment-editor {
@@ -856,19 +1037,8 @@ body.theme-light .canvas-comment-editor__icon-btn {
   --btn-bg-active: rgba(20, 26, 34, 0.16);
 }
 
-body.theme-light .canvas-comment-pin {
-  box-shadow:
-    0 calc(2px * var(--canvas-inverse-scale)) calc(5px * var(--canvas-inverse-scale)) rgba(45, 65, 90, 0.22),
-    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.34);
-}
-
-body.theme-light .canvas-comment-pin.is-active {
-  box-shadow:
-    0 calc(3px * var(--canvas-inverse-scale)) calc(8px * var(--canvas-inverse-scale)) rgba(45, 65, 90, 0.24),
-    inset 0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(255, 255, 255, 0.45),
-    0 0 0 calc(1px * var(--canvas-inverse-scale)) rgba(36, 61, 96, 0.46);
-}
-
 body.theme-light .canvas-comment-editor__input {
   background: transparent;
 }
+
+

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, Sun, Trash2, Unlock } from 'lucide-react'
+import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, SquareStack, Sun, Trash2, Unlock } from 'lucide-react'
 import { Board } from './pages/Board'
+import { getImage } from './storage/imageDB'
 import { generateBoardId } from './utils/id'
 import './App.css'
 
@@ -9,6 +10,8 @@ const NAV_ICON_SIZE = 20
 const ICON_STROKE_WIDTH = 2.3
 const RECENT_BOARDS_KEY = 'curate-recent-boards'
 const MAX_RECENT_BOARDS = 12
+const LOCAL_IMAGE_PREFIXES = ['data:image/', 'blob:', 'idb://']
+const STORAGE_KEY = 'canvas-board-v1'
 
 function normalizeRecentBoards(value) {
   if (!Array.isArray(value)) return []
@@ -37,6 +40,90 @@ function getBoardDisplayName(board) {
   return board.name || formatBoardName(board.id)
 }
 
+function isLocalImageSource(src) {
+  return typeof src === 'string' && LOCAL_IMAGE_PREFIXES.some((prefix) => src.startsWith(prefix))
+}
+
+function isIdbImageSource(src) {
+  return typeof src === 'string' && src.startsWith('idb://')
+}
+
+function getIdbImageId(src) {
+  if (!isIdbImageSource(src)) return null
+  return src.slice('idb://'.length) || null
+}
+
+async function getImageBlobBySrc(src) {
+  const id = getIdbImageId(src)
+  if (!id) return null
+  return getImage(id)
+}
+
+async function uploadImageSourceForShare(src) {
+  let blob = null
+  if (isIdbImageSource(src)) {
+    blob = await getImageBlobBySrc(src)
+    if (!blob) throw new Error('Failed to read local image from IndexedDB')
+  } else {
+    const response = await fetch(src)
+    if (!response.ok) throw new Error('Failed to read local image')
+    blob = await response.blob()
+  }
+  if (!blob.type.startsWith('image/')) throw new Error('Invalid image type')
+  const extension = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'png'
+  const file = new File([blob], `share-${crypto.randomUUID()}.${extension}`, { type: blob.type || 'image/png' })
+
+  const formData = new FormData()
+  formData.append('file', file)
+  const uploadResponse = await fetch('/api/upload-image', {
+    method: 'POST',
+    body: formData,
+  })
+  if (!uploadResponse.ok) throw new Error('Image upload failed')
+  const payload = await uploadResponse.json()
+  if (!payload?.url || typeof payload.url !== 'string') throw new Error('Invalid upload response')
+  return payload.url
+}
+
+async function convertBoardImagesForShare(board) {
+  const boardCopy = JSON.parse(JSON.stringify(board || {}))
+  const srcMap = new Map()
+
+  async function resolveSource(src) {
+    if (!isLocalImageSource(src)) return src
+    if (srcMap.has(src)) return srcMap.get(src)
+    const uploadedUrl = await uploadImageSourceForShare(src)
+    srcMap.set(src, uploadedUrl)
+    return uploadedUrl
+  }
+
+  if (Array.isArray(boardCopy.images)) {
+    for (const image of boardCopy.images) {
+      if (!image || typeof image !== 'object') continue
+      if (typeof image.src === 'string') {
+        image.src = await resolveSource(image.src)
+      }
+      if (typeof image.originalSrc === 'string') {
+        image.originalSrc = await resolveSource(image.originalSrc)
+      }
+    }
+  }
+
+  if (Array.isArray(boardCopy.objects)) {
+    for (const object of boardCopy.objects) {
+      if (!object || object.type !== 'image' || !object.data || typeof object.data !== 'object') continue
+      if (typeof object.data.src === 'string') {
+        object.data.src = await resolveSource(object.data.src)
+      }
+      if (typeof object.data.originalSrc === 'string') {
+        object.data.originalSrc = await resolveSource(object.data.originalSrc)
+      }
+    }
+  }
+
+  return boardCopy
+}
+
 function LogoIcon() {
   return (
     <span className="top-nav__logo" aria-label="Curate">
@@ -61,7 +148,7 @@ function App() {
   const [copied, setCopied] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('curate-theme') || 'dark')
   const [isBoardsOpen, setIsBoardsOpen] = useState(false)
-  const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false })
+  const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false, isClusterMode: false })
   const [editingBoardId, setEditingBoardId] = useState(null)
   const [editingBoardName, setEditingBoardName] = useState('')
   const [recentBoards, setRecentBoards] = useState(() => {
@@ -149,6 +236,7 @@ function App() {
       setCanvasToolbarState({
         isCommentMode: Boolean(detail.isCommentMode),
         isCanvasLocked: Boolean(detail.isCanvasLocked),
+        isClusterMode: Boolean(detail.isClusterMode),
       })
     }
     window.addEventListener('curate:toolbar-state', handleCanvasToolbarState)
@@ -162,7 +250,7 @@ function App() {
 
     try {
       const storageKey = `curate-board-${currentBoardId}`
-      const rawBoard = localStorage.getItem(storageKey)
+      const rawBoard = localStorage.getItem(storageKey) || localStorage.getItem(STORAGE_KEY)
       let parsedBoard = {
         objects: [],
         images: [],
@@ -182,12 +270,14 @@ function App() {
           }
         }
       }
+
+      const boardForShare = await convertBoardImagesForShare(parsedBoard)
       const response = await fetch('/api/share', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ board: parsedBoard }),
+        body: JSON.stringify({ board: boardForShare }),
       })
       if (!response.ok) {
         setCopied(false)
@@ -293,7 +383,7 @@ function App() {
       <div className="left-toolbar" ref={boardsPanelRef}>
         <button
           type="button"
-          className="btn btn-icon left-toolbar__button"
+          className="left-toolbar__button"
           onClick={handleNewBoard}
           aria-label="New board"
           data-tooltip="New Board"
@@ -303,7 +393,7 @@ function App() {
         <div className="left-toolbar__boards">
           <button
             type="button"
-            className="btn btn-icon left-toolbar__button"
+            className="left-toolbar__button"
             onClick={() => setIsBoardsOpen((prev) => !prev)}
             aria-label="Boards"
             aria-expanded={isBoardsOpen}
@@ -380,21 +470,26 @@ function App() {
           ) : null}
         </div>
         <div className="left-toolbar__divider" />
+        <div className="left-toolbar__mode-indicator">
+          <button
+            type="button"
+            className={`left-toolbar__button left-toolbar__button--comment ${canvasToolbarState.isCommentMode ? 'is-comment-active' : ''}`.trim()}
+            onClick={() => dispatchCanvasToolbarAction('toggle-comment')}
+            aria-label={canvasToolbarState.isCommentMode ? 'Comment mode active' : 'Enable comment mode'}
+            data-tooltip={canvasToolbarState.isCommentMode ? 'Comment Mode Active' : 'Enable Comment Mode'}
+          >
+            <span className="btn__icon" aria-hidden="true"><MessageSquare size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+          </button>
+          {canvasToolbarState.isCommentMode ? (
+            <div className="left-toolbar__mode-badge" role="status" aria-live="polite">COMMENT MODE</div>
+          ) : null}
+        </div>
         <button
           type="button"
-          className={`btn btn-icon left-toolbar__button ${canvasToolbarState.isCommentMode ? 'is-active' : ''}`.trim()}
-          onClick={() => dispatchCanvasToolbarAction('toggle-comment')}
-          aria-label={canvasToolbarState.isCommentMode ? 'Disable comment mode' : 'Enable comment mode'}
-          data-tooltip={canvasToolbarState.isCommentMode ? 'Disable Comments' : 'Enable Comments'}
-        >
-          <span className="btn__icon" aria-hidden="true"><MessageSquare size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
-        </button>
-        <button
-          type="button"
-          className={`btn btn-icon left-toolbar__button ${canvasToolbarState.isCanvasLocked ? 'is-active' : ''}`.trim()}
+          className={`left-toolbar__button left-toolbar__button--lock ${canvasToolbarState.isCanvasLocked ? 'is-locked-active' : ''}`.trim()}
           onClick={() => dispatchCanvasToolbarAction('toggle-lock')}
           aria-label={canvasToolbarState.isCanvasLocked ? 'Unlock canvas' : 'Lock canvas'}
-          data-tooltip={canvasToolbarState.isCanvasLocked ? 'Unlock Canvas' : 'Lock Canvas'}
+          data-tooltip={canvasToolbarState.isCanvasLocked ? 'Canvas Locked' : 'Lock Canvas'}
         >
           <span className="btn__icon" aria-hidden="true">
             {canvasToolbarState.isCanvasLocked
@@ -402,9 +497,23 @@ function App() {
               : <Unlock size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />}
           </span>
         </button>
+        <div className="left-toolbar__mode-indicator">
+          <button
+            type="button"
+            className={`left-toolbar__button left-toolbar__button--cluster ${canvasToolbarState.isClusterMode ? 'is-cluster-active' : ''}`.trim()}
+            onClick={() => dispatchCanvasToolbarAction('toggle-cluster')}
+            aria-label={canvasToolbarState.isClusterMode ? 'Disable cluster mode' : 'Create cluster'}
+            data-tooltip={canvasToolbarState.isClusterMode ? 'Cluster Mode Active' : 'Create Cluster'}
+          >
+            <span className="btn__icon" aria-hidden="true"><SquareStack size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+          </button>
+          {canvasToolbarState.isClusterMode ? (
+            <div className="left-toolbar__mode-badge left-toolbar__mode-badge--cluster" role="status" aria-live="polite">CLUSTER MODE</div>
+          ) : null}
+        </div>
         <button
           type="button"
-          className="btn btn-icon left-toolbar__button"
+          className="left-toolbar__button"
           onClick={() => dispatchCanvasToolbarAction('reset-view')}
           aria-label="Reset view"
           data-tooltip="Reset View"
@@ -424,4 +533,6 @@ function App() {
 }
 
 export default App
+
+
 

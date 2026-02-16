@@ -14,6 +14,8 @@ import {
   LayoutGrid,
   Lock,
   MessageSquare,
+  MoreHorizontal,
+  Pencil,
   SendHorizontal,
   Plus,
   RotateCcw,
@@ -24,7 +26,9 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { nanoid } from 'nanoid'
 import { generateBoardId } from '../utils/id'
+import { deleteImage, getImage, saveImage } from '../storage/imageDB'
 import './Canvas.css'
 
 const MIN_SCALE = 0.2
@@ -38,6 +42,7 @@ const GRID_SIZE = 24
 const PASTE_OFFSET_STEP = 20
 const HISTORY_LIMIT = 20
 const MIN_CROP_RECT_SIZE = 16
+const MIN_CLUSTER_SIZE = 24
 const MENU_ICON_SIZE = 18
 const ICON_STROKE_WIDTH = 2.3
 const SMART_SNAP_THRESHOLD = 5
@@ -48,8 +53,12 @@ const COMMENT_POPUP_OFFSET = 14
 const COMMENT_PANEL_VIEWPORT_PADDING = 16
 const COMMENT_PANEL_FALLBACK_WIDTH = 272
 const COMMENT_PANEL_FALLBACK_HEIGHT = 152
-const COMMENT_PIN_COLORS = ['#5f7cff', '#ef6b6b', '#f0a34d', '#59b87f', '#38a9c9', '#9a7cff', '#cf78b8', '#6f8ba6']
+const COMMENT_COLORS = ['#F87171', '#FBBF24', '#34D399', '#60A5FA', '#A78BFA', '#F472B6']
+const DEFAULT_COMMENT_COLOR = '#60A5FA'
 const PASTE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+const STORAGE_KEY = 'canvas-board-v1'
+const MAX_IMAGE_DIMENSION = 4096
+const IMAGE_COMPRESSION_QUALITY = 0.8
 
 function normalizeImageComment(comment) {
   if (!comment || typeof comment !== 'object') return null
@@ -64,6 +73,34 @@ function normalizeImageComment(comment) {
     },
     isDraft: Boolean(comment.isDraft),
     createdAt: typeof comment.createdAt === 'string' ? comment.createdAt : new Date().toISOString(),
+    color: typeof comment.color === 'string' && comment.color ? comment.color : DEFAULT_COMMENT_COLOR,
+  }
+}
+
+async function saveBlobForImage(id, blob) {
+  await saveImage(id, blob)
+  return URL.createObjectURL(blob)
+}
+
+async function getImageBlobById(id) {
+  if (!id || typeof id !== 'string') return null
+  return getImage(id)
+}
+
+async function deleteImageBlobById(id) {
+  if (!id || typeof id !== 'string') return
+  await deleteImage(id)
+}
+
+function stripImageForStorage(image) {
+  if (!image || typeof image !== 'object') return image
+  return {
+    id: image.id,
+    x: image.x,
+    y: image.y,
+    width: image.width,
+    height: image.height,
+    clusterId: image.clusterId ?? null,
   }
 }
 
@@ -82,8 +119,43 @@ function normalizeBoardComment(comment) {
     },
     isDraft: Boolean(comment.isDraft),
     createdAt: typeof comment.createdAt === 'string' ? comment.createdAt : new Date().toISOString(),
+    color: typeof comment.color === 'string' && comment.color ? comment.color : DEFAULT_COMMENT_COLOR,
     zIndex: typeof comment.zIndex === 'number' ? comment.zIndex : 0,
     parentId: typeof comment.parentId === 'string' && comment.parentId ? comment.parentId : null,
+  }
+}
+
+function normalizeCluster(cluster) {
+  if (!cluster || typeof cluster !== 'object') return null
+  const rawBounds = cluster.bounds && typeof cluster.bounds === 'object' ? cluster.bounds : null
+  const x = typeof rawBounds?.x === 'number' ? rawBounds.x : typeof cluster.x === 'number' ? cluster.x : 0
+  const y = typeof rawBounds?.y === 'number' ? rawBounds.y : typeof cluster.y === 'number' ? cluster.y : 0
+  const width = typeof rawBounds?.width === 'number' ? rawBounds.width : typeof cluster.width === 'number' ? cluster.width : 0
+  const height = typeof rawBounds?.height === 'number' ? rawBounds.height : typeof cluster.height === 'number' ? cluster.height : 0
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return null
+  if (width <= 0 || height <= 0) return null
+  const createdAt = typeof cluster.createdAt === 'number' ? cluster.createdAt : Date.now()
+  const updatedAt = typeof cluster.updatedAt === 'number' ? cluster.updatedAt : createdAt
+  const rawName = typeof cluster.name === 'string' && cluster.name.trim()
+    ? cluster.name.trim()
+    : typeof cluster.title === 'string' && cluster.title.trim()
+      ? cluster.title.trim()
+      : 'Cluster'
+  const name = rawName.slice(0, 80)
+  return {
+    id: typeof cluster.id === 'string' ? cluster.id : crypto.randomUUID(),
+    name,
+    title: name,
+    bounds: { x, y, width, height },
+    x,
+    y,
+    width,
+    height,
+    itemIds: Array.isArray(cluster.itemIds)
+      ? cluster.itemIds.filter((itemId) => typeof itemId === 'string' && itemId)
+      : [],
+    createdAt,
+    updatedAt,
   }
 }
 
@@ -101,7 +173,8 @@ const CRC32_TABLE = (() => {
 
 function makeImageItem(src, x, y, width, height) {
   return {
-    id: crypto.randomUUID(),
+    id: nanoid(),
+    type: 'image',
     src,
     originalSrc: src,
     originalWidth: width,
@@ -110,6 +183,7 @@ function makeImageItem(src, x, y, width, height) {
     scale: 1,
     rotation: 0,
     comments: [],
+    clusterId: null,
     x,
     y,
     width,
@@ -123,6 +197,8 @@ function normalizeImageItem(image) {
   const height = typeof image.height === 'number' ? image.height : DEFAULT_IMAGE_MAX
   return {
     ...image,
+    id: typeof image.id === 'string' && image.id ? image.id : crypto.randomUUID(),
+    type: 'image',
     originalSrc: image.originalSrc || image.src,
     originalWidth: typeof image.originalWidth === 'number' ? image.originalWidth : width,
     originalHeight: typeof image.originalHeight === 'number' ? image.originalHeight : height,
@@ -130,6 +206,12 @@ function normalizeImageItem(image) {
     scale: typeof image.scale === 'number' ? image.scale : 1,
     rotation: typeof image.rotation === 'number' ? image.rotation : 0,
     comments: Array.isArray(image.comments) ? image.comments.map(normalizeImageComment).filter(Boolean) : [],
+    clusterId:
+      typeof image.clusterId === 'string' && image.clusterId
+        ? image.clusterId
+        : typeof image.sectionId === 'string' && image.sectionId
+          ? image.sectionId
+          : null,
   }
 }
 
@@ -165,15 +247,6 @@ function getCommentWorldPosition(comment, images) {
   return { x: parent.x + localX, y: parent.y + localY }
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(new Error('Failed to read image file'))
-    reader.readAsDataURL(file)
-  })
-}
-
 function getImageDimensions(src) {
   return new Promise((resolve, reject) => {
     const img = new Image()
@@ -183,23 +256,192 @@ function getImageDimensions(src) {
   })
 }
 
+async function getImageDimensionsFromFile(file) {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    return await getImageDimensions(objectUrl)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('Failed to encode image'))
+          return
+        }
+        resolve(blob)
+      },
+      type,
+      quality,
+    )
+  })
+}
+
+// Compress and constrain large images before they enter app state/storage.
+async function processImage(file) {
+  const bitmap = await createImageBitmap(file)
+  try {
+    const sourceWidth = bitmap.width
+    const sourceHeight = bitmap.height
+    if (!sourceWidth || !sourceHeight) return file
+    const maxSide = Math.max(sourceWidth, sourceHeight)
+    const scale = maxSide > MAX_IMAGE_DIMENSION ? MAX_IMAGE_DIMENSION / maxSide : 1
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = targetWidth
+    canvas.height = targetHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return file
+    ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight)
+
+    try {
+      return await canvasToBlob(canvas, 'image/webp', IMAGE_COMPRESSION_QUALITY)
+    } catch {
+      try {
+        return await canvasToBlob(canvas, 'image/jpeg', IMAGE_COMPRESSION_QUALITY)
+      } catch {
+        return file
+      }
+    }
+  } finally {
+    if (typeof bitmap.close === 'function') bitmap.close()
+  }
+}
+
+async function blobToBytes(blob) {
+  return new Uint8Array(await blob.arrayBuffer())
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
 }
 
-function hashString(value) {
-  let hash = 0
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0
-  }
-  return hash
+function serializeImagesForStorage(images) {
+  return images.map((image) => stripImageForStorage(image))
 }
 
-function serializeImagesForStorage(images) {
-  return images.map((image) => ({
+function computeClusterBoundsFromItemIds(itemIds, imageById, fallbackBounds = { x: 0, y: 0, width: 1, height: 1 }) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const itemId of itemIds) {
+    const image = imageById.get(itemId)
+    if (!image) continue
+    const size = getImageSize(image)
+    minX = Math.min(minX, image.x)
+    minY = Math.min(minY, image.y)
+    maxX = Math.max(maxX, image.x + size.width)
+    maxY = Math.max(maxY, image.y + size.height)
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return {
+      x: fallbackBounds.x,
+      y: fallbackBounds.y,
+      width: Math.max(1, fallbackBounds.width),
+      height: Math.max(1, fallbackBounds.height),
+    }
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  }
+}
+
+function rehydrateBoardState(images, comments, clusters) {
+  const normalizedImages = (Array.isArray(images) ? images : []).map(normalizeImageItem).filter(Boolean)
+  const normalizedClusters = (Array.isArray(clusters) ? clusters : []).map(normalizeCluster).filter(Boolean)
+  const imageById = new Map(normalizedImages.map((image) => [image.id, image]))
+  const validClusterIds = new Set(normalizedClusters.map((cluster) => cluster.id))
+  const imageClusterMap = new Map()
+
+  for (const image of normalizedImages) {
+    if (image.clusterId && validClusterIds.has(image.clusterId)) {
+      imageClusterMap.set(image.id, image.clusterId)
+    }
+  }
+
+  for (const cluster of normalizedClusters) {
+    for (const itemId of cluster.itemIds ?? []) {
+      if (!imageById.has(itemId)) continue
+      if (!imageClusterMap.has(itemId)) imageClusterMap.set(itemId, cluster.id)
+    }
+  }
+
+  const hydratedImages = normalizedImages.map((image) => ({
     ...image,
-    comments: [],
+    clusterId: imageClusterMap.get(image.id) ?? null,
   }))
+  const hydratedImageById = new Map(hydratedImages.map((image) => [image.id, image]))
+  const now = Date.now()
+  const hydratedClusters = normalizedClusters.map((cluster) => {
+    const itemIds = hydratedImages.filter((image) => image.clusterId === cluster.id).map((image) => image.id)
+    const fallback = {
+      x: typeof cluster.bounds?.x === 'number' ? cluster.bounds.x : cluster.x,
+      y: typeof cluster.bounds?.y === 'number' ? cluster.bounds.y : cluster.y,
+      width: typeof cluster.bounds?.width === 'number' ? cluster.bounds.width : cluster.width,
+      height: typeof cluster.bounds?.height === 'number' ? cluster.bounds.height : cluster.height,
+    }
+    const bounds = computeClusterBoundsFromItemIds(itemIds, hydratedImageById, fallback)
+    const name = typeof cluster.name === 'string' && cluster.name.trim() ? cluster.name.trim().slice(0, 80) : 'Cluster'
+    return {
+      ...cluster,
+      name,
+      title: name,
+      itemIds,
+      bounds,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      createdAt: typeof cluster.createdAt === 'number' ? cluster.createdAt : now,
+      updatedAt: typeof cluster.updatedAt === 'number' ? cluster.updatedAt : now,
+    }
+  })
+
+  return {
+    images: hydratedImages,
+    comments: (Array.isArray(comments) ? comments : []).map(normalizeBoardComment).filter(Boolean),
+    clusters: hydratedClusters,
+  }
+}
+
+function serializeClustersForStorage(clusters, images) {
+  const normalizedClusters = (Array.isArray(clusters) ? clusters : []).map(normalizeCluster).filter(Boolean)
+  const normalizedImages = (Array.isArray(images) ? images : []).map(normalizeImageItem).filter(Boolean)
+  const imageById = new Map(normalizedImages.map((image) => [image.id, image]))
+  const syncedClusters = syncClusterItems(normalizedClusters, normalizedImages)
+  return syncedClusters.map((cluster) => {
+    const fallback = {
+      x: typeof cluster.bounds?.x === 'number' ? cluster.bounds.x : cluster.x,
+      y: typeof cluster.bounds?.y === 'number' ? cluster.bounds.y : cluster.y,
+      width: typeof cluster.bounds?.width === 'number' ? cluster.bounds.width : cluster.width,
+      height: typeof cluster.bounds?.height === 'number' ? cluster.bounds.height : cluster.height,
+    }
+    const bounds = computeClusterBoundsFromItemIds(cluster.itemIds ?? [], imageById, fallback)
+    const name = typeof cluster.name === 'string' && cluster.name.trim() ? cluster.name.trim().slice(0, 80) : 'Cluster'
+    return {
+      id: cluster.id,
+      name,
+      title: name,
+      itemIds: cluster.itemIds ?? [],
+      bounds,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      createdAt: typeof cluster.createdAt === 'number' ? cluster.createdAt : Date.now(),
+      updatedAt: typeof cluster.updatedAt === 'number' ? cluster.updatedAt : Date.now(),
+    }
+  })
 }
 
 function serializeCommentsForStorage(comments) {
@@ -213,6 +455,7 @@ function serializeCommentsForStorage(comments) {
         y: typeof comment.position?.y === 'number' ? comment.position.y : 0,
       },
       zIndex: typeof comment?.zIndex === 'number' ? comment.zIndex : 0,
+      color: typeof comment?.color === 'string' && comment.color ? comment.color : DEFAULT_COMMENT_COLOR,
       parentId: typeof comment?.parentId === 'string' && comment.parentId ? comment.parentId : null,
     }))
 }
@@ -247,6 +490,7 @@ function toCanvasObjects(images, comments) {
       text: typeof comment.text === 'string' ? comment.text : '',
       isDraft: Boolean(comment.isDraft),
       createdAt: typeof comment.createdAt === 'string' ? comment.createdAt : new Date().toISOString(),
+      color: typeof comment.color === 'string' && comment.color ? comment.color : DEFAULT_COMMENT_COLOR,
       parentId: typeof comment.parentId === 'string' && comment.parentId ? comment.parentId : null,
       offset:
         typeof comment.parentId === 'string' && comment.parentId
@@ -263,7 +507,7 @@ function toCanvasObjects(images, comments) {
 }
 
 function parseCanvasObjects(objects) {
-  if (!Array.isArray(objects)) return { images: [], comments: [] }
+  if (!Array.isArray(objects)) return { images: [], comments: [], clusters: [] }
   const normalized = objects
     .map((object, index) => ({
       id: typeof object?.id === 'string' ? object.id : crypto.randomUUID(),
@@ -306,6 +550,7 @@ function parseCanvasObjects(objects) {
           position: localPosition,
           isDraft: object.data.isDraft,
           createdAt: object.data.createdAt,
+          color: object.data.color,
           zIndex: object.zIndex,
           parentId,
         }),
@@ -324,34 +569,42 @@ function parseCanvasObjects(objects) {
   return {
     images: images.filter(Boolean),
     comments: comments.filter(Boolean),
+    clusters: [],
   }
 }
 
 function parseBoardState(raw) {
-  if (!raw) return { images: [], comments: [] }
+  if (!raw) return { images: [], comments: [], clusters: [] }
   try {
     const parsed = JSON.parse(raw)
     if (Array.isArray(parsed)) {
       const images = parsed.map(normalizeImageItem)
-      return {
-        images,
-        comments: deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean),
-      }
+      const comments = deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
+      return rehydrateBoardState(images, comments, [])
     }
     if (parsed && typeof parsed === 'object') {
-      if (Array.isArray(parsed.objects)) {
-        return parseCanvasObjects(parsed.objects)
+      if (Array.isArray(parsed.objects) && parsed.objects.length > 0) {
+        const parsedObjects = parseCanvasObjects(parsed.objects)
+        const rawClusters = Array.isArray(parsed.clusters) ? parsed.clusters : Array.isArray(parsed.sections) ? parsed.sections : []
+        const fallbackImages = Array.isArray(parsed.images) ? parsed.images.map(normalizeImageItem).filter(Boolean) : []
+        const fallbackComments = Array.isArray(parsed.comments)
+          ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
+          : deriveBoardCommentsFromImages(fallbackImages).map(normalizeBoardComment).filter(Boolean)
+        const images = parsedObjects.images.length > 0 ? parsedObjects.images : fallbackImages
+        const comments = parsedObjects.comments.length > 0 ? parsedObjects.comments : fallbackComments
+        return rehydrateBoardState(images, comments, rawClusters)
       }
       const images = Array.isArray(parsed.images) ? parsed.images.map(normalizeImageItem) : []
       const comments = Array.isArray(parsed.comments)
         ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
         : deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
-      return { images, comments }
+      const rawClusters = Array.isArray(parsed.clusters) ? parsed.clusters : Array.isArray(parsed.sections) ? parsed.sections : []
+      return rehydrateBoardState(images, comments, rawClusters)
     }
   } catch {
-    return { images: [], comments: [] }
+    return { images: [], comments: [], clusters: [] }
   }
-  return { images: [], comments: [] }
+  return { images: [], comments: [], clusters: [] }
 }
 
 function fitWithinMax(width, height, maxSize = DEFAULT_IMAGE_MAX) {
@@ -446,6 +699,104 @@ function getDraggedGroupBounds(images, draggedIds, initialPositions, dx, dy) {
   }
 
   return { minX, minY, maxX, maxY }
+}
+
+function getBoundsFromImage(image, x = image.x, y = image.y, width = image.width, height = image.height) {
+  return {
+    left: x,
+    top: y,
+    right: x + width,
+    bottom: y + height,
+    width,
+    height,
+  }
+}
+
+function getBoundsFromCluster(cluster) {
+  const x = typeof cluster?.bounds?.x === 'number' ? cluster.bounds.x : cluster.x
+  const y = typeof cluster?.bounds?.y === 'number' ? cluster.bounds.y : cluster.y
+  const width = typeof cluster?.bounds?.width === 'number' ? cluster.bounds.width : cluster.width
+  const height = typeof cluster?.bounds?.height === 'number' ? cluster.bounds.height : cluster.height
+  return {
+    left: x,
+    top: y,
+    right: x + width,
+    bottom: y + height,
+    width,
+    height,
+  }
+}
+
+function getIntersectionArea(a, b) {
+  const left = Math.max(a.left, b.left)
+  const right = Math.min(a.right, b.right)
+  const top = Math.max(a.top, b.top)
+  const bottom = Math.min(a.bottom, b.bottom)
+  const width = right - left
+  const height = bottom - top
+  if (width <= 0 || height <= 0) return 0
+  return width * height
+}
+
+function getBestClusterIdForImageBounds(imageBounds, clusters) {
+  const containing = []
+  for (const cluster of clusters) {
+    const clusterBounds = getBoundsFromCluster(cluster)
+    const isContained =
+      imageBounds.left >= clusterBounds.left &&
+      imageBounds.right <= clusterBounds.right &&
+      imageBounds.top >= clusterBounds.top &&
+      imageBounds.bottom <= clusterBounds.bottom
+    if (isContained) containing.push(cluster.id)
+  }
+  if (containing.length === 0) return null
+  return containing[containing.length - 1]
+}
+
+function getClusterIdByContainment(imageBounds, clusters, currentClusterId = null) {
+  const containing = []
+  for (const cluster of clusters) {
+    const clusterBounds = getBoundsFromCluster(cluster)
+    const isContained =
+      imageBounds.left >= clusterBounds.left &&
+      imageBounds.right <= clusterBounds.right &&
+      imageBounds.top >= clusterBounds.top &&
+      imageBounds.bottom <= clusterBounds.bottom
+    if (isContained) containing.push(cluster.id)
+  }
+  if (containing.length === 0) return null
+  if (currentClusterId && containing.includes(currentClusterId)) return currentClusterId
+  return containing[containing.length - 1]
+}
+
+function assignClusterIdToImage(image, clusters) {
+  const size = getImageSize(image)
+  const bounds = getBoundsFromImage(image, image.x, image.y, size.width, size.height)
+  return getClusterIdByContainment(bounds, clusters, image.clusterId ?? null)
+}
+
+function syncClusterItems(clusters, images) {
+  const byCluster = new Map()
+  for (const image of images) {
+    if (!image.clusterId) continue
+    if (!byCluster.has(image.clusterId)) byCluster.set(image.clusterId, [])
+    byCluster.get(image.clusterId).push(image.id)
+  }
+  return clusters.map((cluster) => {
+    const itemIds = byCluster.get(cluster.id) ?? []
+    if (JSON.stringify(cluster.itemIds ?? []) === JSON.stringify(itemIds)) return cluster
+    return { ...cluster, itemIds, updatedAt: Date.now() }
+  })
+}
+
+function getNextClusterName(clusters) {
+  let max = 0
+  for (const cluster of clusters) {
+    const name = typeof cluster?.name === 'string' ? cluster.name.trim() : ''
+    const match = /^Cluster\s+(\d+)$/i.exec(name)
+    if (match) max = Math.max(max, Number(match[1]))
+  }
+  return `Cluster ${max + 1}`
 }
 
 function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_THRESHOLD) {
@@ -682,18 +1033,21 @@ function WorldOrigin() {
 export function Canvas() {
   const navigate = useNavigate()
   const { id: boardId } = useParams()
-  const storageKey = `curate-board-${boardId}`
+  const legacyStorageKey = `curate-board-${boardId}`
+  const storageKey = STORAGE_KEY
   const snappingStorageKey = `curate-board-snap-${boardId}`
   const imageSnappingStorageKey = `curate-board-snap-images-${boardId}`
-  const initialBoardState = parseBoardState(localStorage.getItem(storageKey))
 
-  const [images, setImages] = useState(initialBoardState.images)
-  const [comments, setComments] = useState(initialBoardState.comments)
+  const [images, setImages] = useState([])
+  const [comments, setComments] = useState([])
+  const [clusters, setClusters] = useState([])
   const [scale, setScale] = useState(1)
   const [offsetX, setOffsetX] = useState(0)
   const [offsetY, setOffsetY] = useState(0)
   const [selectedImageIds, setSelectedImageIds] = useState([])
   const [dragState, setDragState] = useState(null)
+  const [clusterDragState, setClusterDragState] = useState(null)
+  const [clusterDrawState, setClusterDrawState] = useState(null)
   const [commentDragState, setCommentDragState] = useState(null)
   const [resizeState, setResizeState] = useState(null)
   const [panState, setPanState] = useState(null)
@@ -719,6 +1073,11 @@ export function Canvas() {
   const [isQuickCropKeyDown, setIsQuickCropKeyDown] = useState(false)
   const [quickCropState, setQuickCropState] = useState(null)
   const [isCommentMode, setIsCommentMode] = useState(false)
+  const [isClusterMode, setIsClusterMode] = useState(false)
+  const [selectedClusterId, setSelectedClusterId] = useState(null)
+  const [openClusterMenuId, setOpenClusterMenuId] = useState(null)
+  const [editingClusterId, setEditingClusterId] = useState(null)
+  const [editingTitle, setEditingTitle] = useState('')
   const [activeCommentRef, setActiveCommentRef] = useState(null)
   const [commentDraft, setCommentDraft] = useState('')
   const [commentSaveState, setCommentSaveState] = useState('idle')
@@ -741,15 +1100,56 @@ export function Canvas() {
   const suppressCommentPinClickRef = useRef(false)
   const lockFeedbackTimerRef = useRef(null)
   const lockFeedbackLastAtRef = useRef(0)
+  const skipClusterTitleBlurRef = useRef(false)
   const scaleRef = useRef(scale)
   const offsetXRef = useRef(offsetX)
   const offsetYRef = useRef(offsetY)
   const imagesRef = useRef(images)
   const commentsRef = useRef(comments)
+  const clustersRef = useRef(clusters)
   const selectedIdsRef = useRef(selectedImageIds)
   const historyRef = useRef(history)
   const futureRef = useRef(future)
   const applyCropByRectRef = useRef(null)
+  const didHydrateRef = useRef(false)
+  const previousImageSrcsRef = useRef(new Map())
+  const persistCountRef = useRef(0)
+
+  async function restoreBoard() {
+    try {
+      const saved = localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey) || null
+      const parsed = parseBoardState(saved)
+      const hydratedImages = await Promise.all(
+        (Array.isArray(parsed.images) ? parsed.images : []).map(async (rawImage) => {
+          const image = normalizeImageItem(rawImage)
+          try {
+            const blob = await getImageBlobById(image.id)
+            if (!blob) return { ...image, src: null, originalSrc: null }
+            const objectUrl = URL.createObjectURL(blob)
+            return { ...image, src: objectUrl, originalSrc: objectUrl }
+          } catch {
+            return { ...image, src: null, originalSrc: null }
+          }
+        }),
+      )
+      setComments(Array.isArray(parsed.comments) ? parsed.comments : [])
+      setClusters(Array.isArray(parsed.clusters) ? parsed.clusters : [])
+      setImages(hydratedImages)
+      console.log('[Curate] Hydrated board once', {
+        imagesCount: hydratedImages.length,
+        clustersCount: parsed.clusters?.length ?? 0,
+        storageKey,
+      })
+    } catch (error) {
+      console.error('[Curate] Failed to load board:', error)
+    }
+  }
+
+  useEffect(() => {
+    if (didHydrateRef.current) return
+    didHydrateRef.current = true
+    void restoreBoard()
+  }, [])
 
   useEffect(() => {
     scaleRef.current = scale
@@ -762,6 +1162,39 @@ export function Canvas() {
   useEffect(() => {
     commentsRef.current = comments
   }, [comments])
+  useEffect(() => {
+    clustersRef.current = clusters
+  }, [clusters])
+  useEffect(() => {
+    setClusters((prev) => {
+      const next = syncClusterItems(prev, imagesRef.current)
+      const changed =
+        next.length !== prev.length ||
+        next.some((cluster, index) => cluster !== prev[index])
+      return changed ? next : prev
+    })
+  }, [images])
+  useEffect(() => {
+    const previous = previousImageSrcsRef.current
+    const next = new Map(images.map((image) => [image.id, image.src]))
+    for (const [id, prevSrc] of previous.entries()) {
+      const nextSrc = next.get(id)
+      if (prevSrc && prevSrc.startsWith('blob:') && prevSrc !== nextSrc) {
+        URL.revokeObjectURL(prevSrc)
+      }
+    }
+    previousImageSrcsRef.current = next
+  }, [images])
+
+  useEffect(
+    () => () => {
+      for (const src of previousImageSrcsRef.current.values()) {
+        if (src && src.startsWith('blob:')) URL.revokeObjectURL(src)
+      }
+    },
+    [],
+  )
+
   useEffect(() => {
     selectedIdsRef.current = selectedImageIds
   }, [selectedImageIds])
@@ -849,15 +1282,35 @@ export function Canvas() {
   }, [dragState])
 
   useEffect(() => {
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify({
-        objects: toCanvasObjects(images, comments),
+    try {
+      const persistedClusters = serializeClustersForStorage(clusters, images)
+      const boardState = {
         images: serializeImagesForStorage(images),
         comments: serializeCommentsForStorage(comments),
-      }),
-    )
-  }, [images, comments, storageKey])
+        clusters: persistedClusters,
+      }
+      persistCountRef.current += 1
+      console.log('[Curate] Persisting board state', { persistCount: persistCountRef.current, imageCount: boardState.images.length })
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify(boardState),
+      )
+      localStorage.setItem(
+        legacyStorageKey,
+        JSON.stringify(boardState),
+      )
+    } catch (error) {
+      console.error('[Curate] Failed to persist board:', error)
+    }
+  }, [images, comments, clusters, storageKey, legacyStorageKey])
+
+  useEffect(() => {
+    console.log('[Curate] Loaded board state', {
+      imagesCount: images.length,
+      clustersCount: clusters.length,
+      storageKey,
+    })
+  }, [])
 
   useEffect(() => {
     setIsSnappingEnabled(localStorage.getItem(snappingStorageKey) === 'true')
@@ -876,10 +1329,10 @@ export function Canvas() {
     localStorage.setItem(imageSnappingStorageKey, String(isImageSnappingEnabled))
   }, [imageSnappingStorageKey, isImageSnappingEnabled])
 
-  function commitHistory(previousImages, previousSelected, previousComments = commentsRef.current) {
+  function commitHistory(previousImages, previousSelected, previousComments = commentsRef.current, previousClusters = clustersRef.current) {
     // Called only for meaningful operations, so push this snapshot directly.
     setHistory((prev) => {
-      const next = [...prev, { images: previousImages, comments: previousComments, selectedImageIds: previousSelected }]
+      const next = [...prev, { images: previousImages, comments: previousComments, clusters: previousClusters, selectedImageIds: previousSelected }]
       return next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next
     })
     setFuture([])
@@ -890,6 +1343,7 @@ export function Canvas() {
     return (
       JSON.stringify(snapshot.images) !== JSON.stringify(imagesRef.current) ||
       JSON.stringify(snapshot.comments ?? commentsRef.current) !== JSON.stringify(commentsRef.current) ||
+      JSON.stringify(snapshot.clusters ?? clustersRef.current) !== JSON.stringify(clustersRef.current) ||
       JSON.stringify(snapshot.selectedImageIds) !== JSON.stringify(selectedIdsRef.current)
     )
   }
@@ -897,6 +1351,10 @@ export function Canvas() {
   function getImageBounds(image) {
     const size = getImageSize(image)
     return { left: image.x, top: image.y, right: image.x + size.width, bottom: image.y + size.height, width: size.width, height: size.height }
+  }
+
+  function getRenderableImageSrc(src) {
+    return typeof src === 'string' && src.length > 0 ? src : null
   }
 
   function openCommentEditor(commentId) {
@@ -974,6 +1432,19 @@ export function Canvas() {
     if (!image) {
       return false
     }
+    if (
+      !rect ||
+      typeof rect.x !== 'number' ||
+      typeof rect.y !== 'number' ||
+      typeof rect.width !== 'number' ||
+      typeof rect.height !== 'number' ||
+      !Number.isFinite(rect.x) ||
+      !Number.isFinite(rect.y) ||
+      !Number.isFinite(rect.width) ||
+      !Number.isFinite(rect.height)
+    ) {
+      return false
+    }
     const bounds = getImageBounds(image)
     const left = clamp(rect.x, bounds.left, bounds.right)
     const top = clamp(rect.y, bounds.top, bounds.bottom)
@@ -981,12 +1452,14 @@ export function Canvas() {
     const bottom = clamp(rect.y + rect.height, bounds.top, bounds.bottom)
     const cropWidth = right - left
     const cropHeight = bottom - top
-    if (cropWidth <= 1 || cropHeight <= 1) {
+    if (!Number.isFinite(cropWidth) || !Number.isFinite(cropHeight) || cropWidth <= 1 || cropHeight <= 1) {
       return false
     }
     try {
       const img = new Image()
-      img.src = image.src
+      const sourceSrc = getRenderableImageSrc(image.src)
+      if (!sourceSrc) return false
+      img.src = sourceSrc
       await new Promise((resolve, reject) => {
         img.onload = resolve
         img.onerror = reject
@@ -994,22 +1467,39 @@ export function Canvas() {
       const displaySize = getImageSize(image)
       const scaleX = img.naturalWidth / displaySize.width
       const scaleY = img.naturalHeight / displaySize.height
+      if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+        return false
+      }
       const sx = Math.max(0, (left - image.x) * scaleX)
       const sy = Math.max(0, (top - image.y) * scaleY)
       const sw = Math.min(img.naturalWidth - sx, cropWidth * scaleX)
       const sh = Math.min(img.naturalHeight - sy, cropHeight * scaleY)
-      if (sw <= 1 || sh <= 1) {
+      if (!Number.isFinite(sw) || !Number.isFinite(sh) || sw <= 1 || sh <= 1) {
         return false
       }
       const canvas = document.createElement('canvas')
-      canvas.width = Math.max(1, Math.round(sw))
-      canvas.height = Math.max(1, Math.round(sh))
+      const outputWidth = Math.max(1, Math.round(sw))
+      const outputHeight = Math.max(1, Math.round(sh))
+      if (outputWidth <= 1 || outputHeight <= 1) {
+        return false
+      }
+      canvas.width = outputWidth
+      canvas.height = outputHeight
       const ctx = canvas.getContext('2d')
       if (!ctx) {
         return false
       }
       ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
-      const croppedSrc = canvas.toDataURL('image/png')
+      const croppedBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('Failed to encode crop'))
+            return
+          }
+          resolve(blob)
+        }, 'image/png')
+      })
+      const croppedSrc = await saveBlobForImage(image.id, croppedBlob)
       setImages((prev) =>
         prev.map((item) =>
           item.id === image.id
@@ -1028,8 +1518,10 @@ export function Canvas() {
   async function confirmCropMode() {
     if (!cropMode) return
     const mode = cropMode
-    await applyCropByRect(mode.id, mode.rect, mode.historySnapshot)
-    cancelCropMode()
+    const didCrop = await applyCropByRect(mode.id, mode.rect, mode.historySnapshot)
+    if (didCrop) {
+      cancelCropMode()
+    }
   }
   applyCropByRectRef.current = applyCropByRect
 
@@ -1037,7 +1529,7 @@ export function Canvas() {
     const prevHistory = historyRef.current
     if (prevHistory.length === 0) return false
     const previousState = prevHistory[prevHistory.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = { images: imagesRef.current, comments: commentsRef.current, clusters: clustersRef.current, selectedImageIds: selectedIdsRef.current }
     const nextHistory = prevHistory.slice(0, -1)
     const nextFuture = [...futureRef.current, currentState]
     const clampedFuture = nextFuture.length > HISTORY_LIMIT ? nextFuture.slice(nextFuture.length - HISTORY_LIMIT) : nextFuture
@@ -1047,6 +1539,7 @@ export function Canvas() {
     setFuture(clampedFuture)
     setImages(previousState.images)
     setComments(previousState.comments ?? commentsRef.current)
+    setClusters(previousState.clusters ?? clustersRef.current)
     setSelectedImageIds(previousState.selectedImageIds)
     setMenuState(null)
     return true
@@ -1056,7 +1549,7 @@ export function Canvas() {
     const prevFuture = futureRef.current
     if (prevFuture.length === 0) return false
     const nextState = prevFuture[prevFuture.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = { images: imagesRef.current, comments: commentsRef.current, clusters: clustersRef.current, selectedImageIds: selectedIdsRef.current }
     const nextFuture = prevFuture.slice(0, -1)
     const nextHistory = [...historyRef.current, currentState]
     const clampedHistory = nextHistory.length > HISTORY_LIMIT ? nextHistory.slice(nextHistory.length - HISTORY_LIMIT) : nextHistory
@@ -1066,6 +1559,7 @@ export function Canvas() {
     setFuture(nextFuture)
     setImages(nextState.images)
     setComments(nextState.comments ?? commentsRef.current)
+    setClusters(nextState.clusters ?? clustersRef.current)
     setSelectedImageIds(nextState.selectedImageIds)
     setMenuState(null)
     return true
@@ -1232,9 +1726,9 @@ export function Canvas() {
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('curate:toolbar-state', {
-      detail: { isCommentMode, isCanvasLocked },
+      detail: { isCommentMode, isCanvasLocked, isClusterMode },
     }))
-  }, [isCommentMode, isCanvasLocked])
+  }, [isCommentMode, isCanvasLocked, isClusterMode])
 
   useEffect(() => {
     function handleToolbarAction(event) {
@@ -1247,13 +1741,17 @@ export function Canvas() {
         handleToggleCanvasLock()
         return
       }
+      if (action === 'toggle-cluster') {
+        setIsClusterMode((prev) => !prev)
+        return
+      }
       if (action === 'reset-view') {
         handleResetView()
       }
     }
     window.addEventListener('curate:toolbar-action', handleToolbarAction)
     return () => window.removeEventListener('curate:toolbar-action', handleToolbarAction)
-  }, [isCommentMode, isCanvasLocked, offsetX, offsetY, scale, images])
+  }, [isCommentMode, isCanvasLocked, isClusterMode, offsetX, offsetY, scale, images])
 
   useEffect(() => {
     function handleDelete(event) {
@@ -1268,10 +1766,16 @@ export function Canvas() {
       event.preventDefault()
       const prevImages = imagesRef.current
       const prevSelected = selectedIdsRef.current
+      const imagesToDelete = prevImages.filter((image) => selectedImageIds.includes(image.id))
       setImages((prev) => prev.filter((image) => !selectedImageIds.includes(image.id)))
       setSelectedImageIds([])
       setMenuState(null)
       commitHistory(prevImages, prevSelected)
+      void Promise.all(
+        imagesToDelete.map((image) => deleteImageBlobById(image.id)),
+      ).catch(() => {
+        // Ignore blob cleanup failure; metadata removal is already complete.
+      })
     }
     window.addEventListener('keydown', handleDelete)
     return () => window.removeEventListener('keydown', handleDelete)
@@ -1279,8 +1783,10 @@ export function Canvas() {
 
   useEffect(() => {
     if (!isCanvasLocked) return
-    if (!dragState && !resizeState && !panState && !marqueeState && !cropInteraction && !quickCropState && !cropMode) return
+    if (!dragState && !clusterDragState && !clusterDrawState && !resizeState && !panState && !marqueeState && !cropInteraction && !quickCropState && !cropMode) return
     setDragState(null)
+    setClusterDragState(null)
+    setClusterDrawState(null)
     setResizeState(null)
     setPanState(null)
     setMarqueeState(null)
@@ -1288,7 +1794,14 @@ export function Canvas() {
     setQuickCropState(null)
     setCropMode(null)
     setSmartGuides({ vertical: null, horizontal: null })
-  }, [isCanvasLocked, dragState, resizeState, panState, marqueeState, cropInteraction, quickCropState, cropMode])
+  }, [isCanvasLocked, dragState, clusterDragState, clusterDrawState, resizeState, panState, marqueeState, cropInteraction, quickCropState, cropMode])
+
+  useEffect(() => {
+    if (!isCanvasLocked) return
+    setEditingClusterId(null)
+    setEditingTitle('')
+    setOpenClusterMenuId(null)
+  }, [isCanvasLocked])
 
   useEffect(() => {
     function handleKeyActions(event) {
@@ -1348,12 +1861,26 @@ export function Canvas() {
     return { x: (rect.width / 2 - offsetX) / scale, y: (rect.height / 2 - offsetY) / scale }
   }
 
-  async function createImagesFromFiles(files, baseX, baseY) {
-    const dataUrls = await Promise.all(files.map((file) => fileToDataUrl(file)))
-    const dimensions = await Promise.all(dataUrls.map((src) => getImageDimensions(src)))
-    return dataUrls.map((src, index) => {
-      const fitted = fitWithinMax(dimensions[index].width, dimensions[index].height)
-      return makeImageItem(src, baseX + index * IMAGE_SPACING, baseY + index * IMAGE_SPACING, fitted.width, fitted.height)
+async function createImagesFromFiles(files, baseX, baseY) {
+  const localImages = await Promise.all(
+    files.map(async (file) => {
+      const imageId = nanoid()
+      const processedBlob = await processImage(file)
+      const [src, dimensions] = await Promise.all([
+        saveBlobForImage(imageId, processedBlob),
+        getImageDimensionsFromFile(
+          new File([processedBlob], `optimized-${imageId}`, { type: processedBlob.type || file.type || 'image/webp' }),
+        ),
+      ])
+      return { id: imageId, src, dimensions }
+    }),
+  )
+    const nextClusters = clustersRef.current
+    return localImages.map(({ id, src, dimensions }, index) => {
+      const fitted = fitWithinMax(dimensions.width, dimensions.height)
+      const image = makeImageItem(src, baseX + index * IMAGE_SPACING, baseY + index * IMAGE_SPACING, fitted.width, fitted.height)
+      const withId = { ...image, id }
+      return { ...withId, clusterId: assignClusterIdToImage(withId, nextClusters) }
     })
   }
 
@@ -1366,7 +1893,17 @@ export function Canvas() {
     const center = getViewportCenterPoint()
     if (!center) return false
     const offset = pasteCount * PASTE_OFFSET_STEP
-    const newImages = await createImagesFromFiles(files, center.x + offset, center.y + offset)
+    let newImages = []
+    try {
+      newImages = await createImagesFromFiles(files, center.x + offset, center.y + offset)
+    } catch {
+      setPasteFeedback('Failed to insert image')
+      return false
+    }
+    if (newImages.length === 0) {
+      setPasteFeedback('Failed to insert image')
+      return false
+    }
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
     setImages((prev) => [...prev, ...newImages])
@@ -1390,7 +1927,11 @@ export function Canvas() {
     const maxBottom = Math.max(...items.map((item) => item.relY + item.height))
     const startX = center.x - maxRight / 2 + offset
     const startY = center.y - maxBottom / 2 + offset
-    const pasted = items.map((item) => makeImageItem(item.src, startX + item.relX, startY + item.relY, item.width, item.height))
+    const nextClusters = clustersRef.current
+    const pasted = items.map((item) => {
+      const image = makeImageItem(item.src, startX + item.relX, startY + item.relY, item.width, item.height)
+      return { ...image, clusterId: assignClusterIdToImage(image, nextClusters) }
+    })
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
     setImages((prev) => [...prev, ...pasted])
@@ -1429,10 +1970,17 @@ export function Canvas() {
         const imageType = item.types.find((type) => type.startsWith('image/'))
         if (!imageType) continue
         const blob = await item.getType(imageType)
-        const src = await fileToDataUrl(blob)
-        const dimensions = await getImageDimensions(src)
+        const file = new File([blob], `clipboard-${crypto.randomUUID()}`, { type: blob.type || imageType })
+        const imageId = nanoid()
+        const processedBlob = await processImage(file)
+        const [src, dimensions] = await Promise.all([
+          saveBlobForImage(imageId, processedBlob),
+          getImageDimensionsFromFile(
+            new File([processedBlob], `optimized-${imageId}`, { type: processedBlob.type || file.type || 'image/webp' }),
+          ),
+        ])
         const fitted = fitWithinMax(dimensions.width, dimensions.height)
-        return { status: 'image', image: { src, width: fitted.width, height: fitted.height } }
+        return { status: 'image', image: { id: imageId, src, width: fitted.width, height: fitted.height } }
       }
     } catch {
       return { status: 'denied', image: null }
@@ -1474,6 +2022,8 @@ export function Canvas() {
         systemImage.width,
         systemImage.height,
       )
+      pastedImage.id = systemImage.id
+      pastedImage.clusterId = assignClusterIdToImage(pastedImage, clustersRef.current)
       const prevImages = imagesRef.current
       const prevSelected = selectedIdsRef.current
       setImages((prev) => [...prev, pastedImage])
@@ -1490,7 +2040,7 @@ export function Canvas() {
   }
 
   useEffect(() => {
-    if (!dragState && !commentDragState && !panState && !resizeState && !marqueeState && !cropInteraction && !quickCropState) return
+    if (!dragState && !clusterDragState && !clusterDrawState && !commentDragState && !panState && !resizeState && !marqueeState && !cropInteraction && !quickCropState) return
     function handleMouseMove(event) {
       const rect = canvasRef.current?.getBoundingClientRect()
       if (!rect) return
@@ -1553,6 +2103,44 @@ export function Canvas() {
         const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetXRef.current, offsetYRef.current, scaleRef.current)
         setQuickCropState((prev) =>
           prev ? { ...prev, currentX: pointer.x, currentY: pointer.y } : prev,
+        )
+        return
+      }
+
+      if (clusterDrawState) {
+        const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetXRef.current, offsetYRef.current, scaleRef.current)
+        setClusterDrawState((prev) => (prev ? { ...prev, currentX: pointer.x, currentY: pointer.y } : prev))
+        return
+      }
+
+      if (clusterDragState) {
+        const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetXRef.current, offsetYRef.current, scaleRef.current)
+        const dx = pointer.x - clusterDragState.startPointerX
+        const dy = pointer.y - clusterDragState.startPointerY
+        setClusters((prev) =>
+          prev.map((cluster) =>
+            cluster.id === clusterDragState.clusterId
+              ? {
+                  ...cluster,
+                  bounds: {
+                    x: clusterDragState.startClusterX + dx,
+                    y: clusterDragState.startClusterY + dy,
+                    width: getBoundsFromCluster(cluster).width,
+                    height: getBoundsFromCluster(cluster).height,
+                  },
+                  x: clusterDragState.startClusterX + dx,
+                  y: clusterDragState.startClusterY + dy,
+                  updatedAt: Date.now(),
+                }
+              : cluster,
+          ),
+        )
+        setImages((prev) =>
+          prev.map((image) => {
+            const start = clusterDragState.childStartPositions[image.id]
+            if (!start) return image
+            return { ...image, x: start.x + dx, y: start.y + dy }
+          }),
         )
         return
       }
@@ -1636,11 +2224,22 @@ export function Canvas() {
         } else {
           setSmartGuides((prev) => (prev.vertical || prev.horizontal ? { vertical: null, horizontal: null } : prev))
         }
+        const movedIds = new Set(dragState.draggedIds)
+        const nextClusters = clustersRef.current
         setImages((prev) =>
           prev.map((image) => {
-            if (!dragState.draggedIds.includes(image.id)) return image
-            const start = dragState.initialPositions[image.id]
-            return { ...image, x: start.x + dx, y: start.y + dy }
+            if (!movedIds.has(image.id)) return image
+            const start = dragState.initialAllPositions[image.id]
+            if (!start) return image
+            const nextX = start.x + dx
+            const nextY = start.y + dy
+            const size = getImageSize(image)
+            const nextClusterId = getClusterIdByContainment(
+              getBoundsFromImage(image, nextX, nextY, size.width, size.height),
+              nextClusters,
+              image.clusterId ?? null,
+            )
+            return { ...image, x: nextX, y: nextY, clusterId: nextClusterId }
           }),
         )
         return
@@ -1690,6 +2289,92 @@ export function Canvas() {
     }
 
     function handleMouseUp() {
+      if (clusterDrawState) {
+        const state = clusterDrawState
+        setClusterDrawState(null)
+        const left = Math.min(state.startX, state.currentX)
+        const top = Math.min(state.startY, state.currentY)
+        const width = Math.abs(state.currentX - state.startX)
+        const height = Math.abs(state.currentY - state.startY)
+        if (width >= MIN_CLUSTER_SIZE && height >= MIN_CLUSTER_SIZE) {
+          try {
+            const clusterId = crypto.randomUUID()
+            const drawBounds = { x: left, y: top, width, height }
+            const isNested = clustersRef.current.some((cluster) => {
+              const bounds = getBoundsFromCluster(cluster)
+              return (
+                drawBounds.x >= bounds.left &&
+                drawBounds.y >= bounds.top &&
+                drawBounds.x + drawBounds.width <= bounds.right &&
+                drawBounds.y + drawBounds.height <= bounds.bottom
+              )
+            })
+            if (isNested) {
+              return
+            }
+            const newName = getNextClusterName(clustersRef.current)
+            const now = Date.now()
+            const nextCluster = {
+              id: clusterId,
+              name: newName,
+              title: newName,
+              itemIds: [],
+              bounds: drawBounds,
+              x: drawBounds.x,
+              y: drawBounds.y,
+              width: drawBounds.width,
+              height: drawBounds.height,
+              createdAt: now,
+              updatedAt: now,
+            }
+            const nextClusters = [...clustersRef.current, nextCluster]
+            const nextClusterBounds = getBoundsFromCluster(nextCluster)
+            let assignedCount = 0
+            const nextImages = imagesRef.current.map((image) => {
+              const size = getImageSize(image)
+              const bounds = getBoundsFromImage(image, image.x, image.y, size.width, size.height)
+              const intersectsNewCluster = getIntersectionArea(bounds, nextClusterBounds) > 0
+              if (!intersectsNewCluster) return image
+              assignedCount += 1
+              if (image.clusterId === clusterId) return image
+              return { ...image, clusterId: clusterId }
+            })
+            if (assignedCount === 0) return
+            const syncedClusters = syncClusterItems(nextClusters, nextImages).map((cluster) =>
+              cluster.id === clusterId ? { ...cluster, updatedAt: Date.now() } : cluster,
+            )
+            setClusters(syncedClusters)
+            setImages(nextImages)
+            setSelectedClusterId(clusterId)
+          } catch {
+            // Fail-safe: keep default interaction if cluster creation fails.
+          }
+        }
+        if (hasSnapshotChanged(state.historySnapshot)) {
+          commitHistory(
+            state.historySnapshot.images,
+            state.historySnapshot.selectedImageIds,
+            state.historySnapshot.comments,
+            state.historySnapshot.clusters,
+          )
+        }
+        return
+      }
+
+      if (clusterDragState) {
+        const state = clusterDragState
+        if (hasSnapshotChanged(state.historySnapshot)) {
+          commitHistory(
+            state.historySnapshot.images,
+            state.historySnapshot.selectedImageIds,
+            state.historySnapshot.comments,
+            state.historySnapshot.clusters,
+          )
+        }
+        setClusterDragState(null)
+        return
+      }
+
       if (quickCropState) {
         const state = quickCropState
         setQuickCropState(null)
@@ -1746,9 +2431,12 @@ export function Canvas() {
           commentDragState.historySnapshot.images,
           commentDragState.historySnapshot.selectedImageIds,
           commentDragState.historySnapshot.comments,
+          commentDragState.historySnapshot.clusters,
         )
       }
       setDragState(null)
+      setClusterDragState(null)
+      setClusterDrawState(null)
       setCommentDragState(null)
       setSmartGuides({ vertical: null, horizontal: null })
       setPanState(null)
@@ -1762,7 +2450,7 @@ export function Canvas() {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled])
+  }, [dragState, clusterDragState, clusterDrawState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled, isCommentMode, isCanvasLocked])
 
   function handleDragOver(event) {
     if (quickCropState) return
@@ -1784,7 +2472,12 @@ export function Canvas() {
     const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith('image/'))
     let newImages = []
     if (files.length > 0) {
-      newImages = await createImagesFromFiles(files, point.x, point.y)
+      try {
+        newImages = await createImagesFromFiles(files, point.x, point.y)
+      } catch {
+        setPasteFeedback('Failed to insert image')
+        return
+      }
     } else {
       // 2) URL-drop flow (e.g. websites that expose image URI via text/uri-list)
       const uriList = event.dataTransfer.getData('text/uri-list')
@@ -1800,12 +2493,22 @@ export function Canvas() {
         if (!response.ok) throw new Error('Failed to fetch dropped URL')
         const blob = await response.blob()
         if (!blob.type.startsWith('image/')) throw new Error('Dropped URL is not an image')
-        const src = await fileToDataUrl(blob)
-        const dimensions = await getImageDimensions(src)
+        const file = new File([blob], `drop-${crypto.randomUUID()}`, { type: blob.type })
+        const imageId = nanoid()
+        const processedBlob = await processImage(file)
+        const [src, dimensions] = await Promise.all([
+          saveBlobForImage(imageId, processedBlob),
+          getImageDimensionsFromFile(
+            new File([processedBlob], `optimized-${imageId}`, { type: processedBlob.type || file.type || 'image/webp' }),
+          ),
+        ])
         const fitted = fitWithinMax(dimensions.width, dimensions.height)
-        newImages = [makeImageItem(src, point.x, point.y, fitted.width, fitted.height)]
+        const image = makeImageItem(src, point.x, point.y, fitted.width, fitted.height)
+        image.id = imageId
+        image.clusterId = assignClusterIdToImage(image, clustersRef.current)
+        newImages = [image]
       } catch {
-        window.alert('This image cannot be dragged. Try copy-paste instead.')
+        setPasteFeedback('This image cannot be dropped')
         return
       }
     }
@@ -1842,6 +2545,8 @@ export function Canvas() {
     event.preventDefault()
     event.stopPropagation()
     setMenuState(null)
+    setOpenClusterMenuId(null)
+    setSelectedClusterId(null)
     if (!canTransform) {
       if (!selectedImageIds.includes(image.id)) setSelectedImageIds([image.id])
       showLockBlockedFeedback()
@@ -1885,7 +2590,9 @@ export function Canvas() {
     if (!rect) return
     const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
     const initialPositions = {}
+    const initialAllPositions = {}
     for (const currentImage of images) {
+      initialAllPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
       if (draggedIds.includes(currentImage.id)) initialPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
     }
     setDragState({
@@ -1894,8 +2601,139 @@ export function Canvas() {
       startPointerX: pointer.x,
       startPointerY: pointer.y,
       initialPositions,
+      initialAllPositions,
       historySnapshot: { images: imagesRef.current, selectedImageIds: selectedIdsRef.current },
     })
+  }
+
+  function handleClusterMouseDown(event, cluster) {
+    if (event.button !== 0) return
+    if (!canTransform || isCommentMode || resizeState || cropMode || quickCropState) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedClusterId(cluster.id)
+    setOpenClusterMenuId(null)
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
+    const childStartPositions = {}
+    for (const image of imagesRef.current) {
+      if (image.clusterId !== cluster.id) continue
+      childStartPositions[image.id] = { x: image.x, y: image.y }
+    }
+    const bounds = getBoundsFromCluster(cluster)
+    setClusterDragState({
+      clusterId: cluster.id,
+      startPointerX: pointer.x,
+      startPointerY: pointer.y,
+      startClusterX: bounds.left,
+      startClusterY: bounds.top,
+      childStartPositions,
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        clusters: clustersRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
+    })
+  }
+
+  function handleStartClusterTitleEdit(event, cluster) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (isCanvasLocked) return
+    const nextTitle = typeof cluster.name === 'string' && cluster.name.trim() ? cluster.name.trim().slice(0, 80) : getNextClusterName(clustersRef.current)
+    setEditingClusterId(cluster.id)
+    setEditingTitle(nextTitle)
+    setOpenClusterMenuId(null)
+  }
+
+  function cancelClusterTitleEdit() {
+    setEditingClusterId(null)
+    setEditingTitle('')
+  }
+
+  function saveClusterTitleEdit(clusterId, rawTitle) {
+    if (!clusterId) return
+    const previousClusters = clustersRef.current
+    const targetCluster = previousClusters.find((cluster) => cluster.id === clusterId)
+    if (!targetCluster) {
+      cancelClusterTitleEdit()
+      return
+    }
+    const normalizedTitle = (typeof rawTitle === 'string' ? rawTitle.trim() : '').slice(0, 80) || targetCluster.name || 'Cluster'
+    const currentTitle = typeof targetCluster.name === 'string' && targetCluster.name.trim() ? targetCluster.name.trim() : 'Cluster'
+    if (normalizedTitle === currentTitle) {
+      cancelClusterTitleEdit()
+      return
+    }
+    const previousImages = imagesRef.current
+    const previousSelected = selectedIdsRef.current
+    const previousComments = commentsRef.current
+    try {
+      setClusters((prev) =>
+        prev.map((cluster) =>
+          cluster.id === clusterId
+            ? { ...cluster, name: normalizedTitle, title: normalizedTitle, updatedAt: Date.now() }
+            : cluster,
+        ),
+      )
+      commitHistory(previousImages, previousSelected, previousComments, previousClusters)
+    } catch {
+      setClusters(previousClusters)
+    } finally {
+      cancelClusterTitleEdit()
+    }
+  }
+
+  function handleClusterTitleInputBlur() {
+    if (skipClusterTitleBlurRef.current) {
+      skipClusterTitleBlurRef.current = false
+      return
+    }
+    if (!editingClusterId) return
+    saveClusterTitleEdit(editingClusterId, editingTitle)
+  }
+
+  function handleClusterTitleInputKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (!editingClusterId) return
+      saveClusterTitleEdit(editingClusterId, editingTitle)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      skipClusterTitleBlurRef.current = true
+      cancelClusterTitleEdit()
+    }
+  }
+
+  function handleToggleClusterMenu(event, clusterId) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (isCanvasLocked) return
+    setSelectedClusterId(clusterId)
+    setOpenClusterMenuId((prev) => (prev === clusterId ? null : clusterId))
+  }
+
+  function handleUngroupCluster(event, clusterId) {
+    event.preventDefault()
+    event.stopPropagation()
+    const prevImages = imagesRef.current
+    const prevSelected = selectedIdsRef.current
+    const prevComments = commentsRef.current
+    const prevClusters = clustersRef.current
+    setImages((prev) =>
+      prev.map((image) => (image.clusterId === clusterId ? { ...image, clusterId: null } : image)),
+    )
+    setClusters((prev) => prev.filter((cluster) => cluster.id !== clusterId))
+    setSelectedClusterId((prev) => (prev === clusterId ? null : prev))
+    setOpenClusterMenuId(null)
+    cancelClusterTitleEdit()
+    commitHistory(prevImages, prevSelected, prevComments, prevClusters)
   }
 
   function handleResizeHandleMouseDown(event, image, handle) {
@@ -1949,6 +2787,8 @@ export function Canvas() {
 
   function handleCanvasMouseDown(event) {
     setMenuState(null)
+    setOpenClusterMenuId(null)
+    setSelectedClusterId(null)
     if (activeCommentRef) {
       closeCommentEditorFromOutside()
     }
@@ -2023,6 +2863,34 @@ export function Canvas() {
         startClientY: event.clientY,
         startOffsetX: offsetX,
         startOffsetY: offsetY,
+      })
+      return
+    }
+    if (event.button === 0 && isClusterMode) {
+      const isTransforming = Boolean(resizeState)
+      const isCropping = Boolean(cropMode)
+      const isQuickCropping = Boolean(quickCropState)
+      if (isCanvasLocked || isCommentMode || isTransforming || isCropping || isQuickCropping) return
+      const rect = canvasRef.current?.getBoundingClientRect()
+      if (!rect) return
+      event.preventDefault()
+      const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
+      const isInsideExistingCluster = clustersRef.current.some((cluster) => {
+        const bounds = getBoundsFromCluster(cluster)
+        return pointer.x >= bounds.left && pointer.x <= bounds.right && pointer.y >= bounds.top && pointer.y <= bounds.bottom
+      })
+      if (isInsideExistingCluster) return
+      setClusterDrawState({
+        startX: pointer.x,
+        startY: pointer.y,
+        currentX: pointer.x,
+        currentY: pointer.y,
+        historySnapshot: {
+          images: imagesRef.current,
+          comments: commentsRef.current,
+          clusters: clustersRef.current,
+          selectedImageIds: selectedIdsRef.current,
+        },
       })
       return
     }
@@ -2216,14 +3084,38 @@ export function Canvas() {
       setMenuState(null)
       return
     }
-    const zipEntries = images
-      .map((image, index) => {
-        const parsed = parseDataUrl(image.src)
-        if (!parsed) return null
-        const ext = getFileExtensionFromMime(parsed.mimeType)
-        return { name: `image-${index + 1}.${ext}`, bytes: parsed.bytes }
-      })
-      .filter(Boolean)
+    const zipEntries = (
+      await Promise.all(
+        images.map(async (image, index) => {
+          try {
+            const storedBlob = await getImageBlobById(image.id)
+            if (storedBlob) {
+              const ext = getFileExtensionFromMime(storedBlob.type || 'image/png')
+              const bytes = await blobToBytes(storedBlob)
+              return { name: `image-${index + 1}.${ext}`, bytes }
+            }
+          } catch {
+            // Fall through to fetch-based fallback.
+          }
+          const parsed = parseDataUrl(image.src)
+          if (parsed) {
+            const ext = getFileExtensionFromMime(parsed.mimeType)
+            return { name: `image-${index + 1}.${ext}`, bytes: parsed.bytes }
+          }
+
+          try {
+            const response = await fetch(image.src)
+            if (!response.ok) return null
+            const blob = await response.blob()
+            const ext = getFileExtensionFromMime(blob.type || 'image/png')
+            const bytes = await blobToBytes(blob)
+            return { name: `image-${index + 1}.${ext}`, bytes }
+          } catch {
+            return null
+          }
+        }),
+      )
+    ).filter(Boolean)
 
     if (zipEntries.length === 0) {
       setMenuState(null)
@@ -2323,12 +3215,14 @@ export function Canvas() {
     const localPosition = parent
       ? { x: pointer.x - parent.x, y: pointer.y - parent.y }
       : { x: pointer.x, y: pointer.y }
+    const randomColor = COMMENT_COLORS[Math.floor(Math.random() * COMMENT_COLORS.length)] || DEFAULT_COMMENT_COLOR
     const comment = {
       id: crypto.randomUUID(),
       text: '',
       position: localPosition,
       isDraft: true,
       createdAt: new Date().toISOString(),
+      color: randomColor,
       zIndex: nextZIndex,
       parentId: parent ? parent.id : null,
     }
@@ -2473,6 +3367,14 @@ export function Canvas() {
         height: Math.abs(quickCropState.currentY - quickCropState.startY),
       }
     : null
+  const clusterDraftRect = clusterDrawState
+    ? {
+        left: Math.min(clusterDrawState.startX, clusterDrawState.currentX),
+        top: Math.min(clusterDrawState.startY, clusterDrawState.currentY),
+        width: Math.abs(clusterDrawState.currentX - clusterDrawState.startX),
+        height: Math.abs(clusterDrawState.currentY - clusterDrawState.startY),
+      }
+    : null
   const hasImages = images.length > 0
   const shouldShowWorldOrigin = scale < 1.2 || !hasImages
   const commentPins = comments.map((comment) => {
@@ -2481,7 +3383,7 @@ export function Canvas() {
       commentId: comment.id,
       text: comment.text ?? '',
       isDraft: Boolean(comment.isDraft),
-      color: COMMENT_PIN_COLORS[hashString(comment.id) % COMMENT_PIN_COLORS.length],
+      color: typeof comment.color === 'string' && comment.color ? comment.color : DEFAULT_COMMENT_COLOR,
       zIndex: typeof comment.zIndex === 'number' ? comment.zIndex : 0,
       worldX: world.x,
       worldY: world.y,
@@ -2517,14 +3419,14 @@ export function Canvas() {
   return (
     <div
       ref={canvasRef}
-      className={`canvas-viewport ${isQuickCropKeyDown && !cropMode ? 'is-crop-key-held' : ''} ${isCommentMode ? 'is-comment-mode' : ''} ${isCanvasLocked ? 'is-locked' : ''} ${isSpaceDown && canPan && !cropMode && !quickCropState ? 'is-space-pan-ready' : ''} ${panState ? 'is-panning' : ''}`}
+      className={`canvas-viewport ${isQuickCropKeyDown && !cropMode ? 'is-crop-key-held' : ''} ${isCommentMode ? 'is-comment-mode' : ''} ${isClusterMode ? 'is-cluster-mode' : ''} ${isCanvasLocked ? 'is-locked' : ''} ${isSpaceDown && canPan && !cropMode && !quickCropState ? 'is-space-pan-ready' : ''} ${panState ? 'is-panning' : ''}`}
       style={{
         '--canvas-grid-size': `${GRID_SIZE}px`,
         '--canvas-scale': scale,
         '--canvas-inverse-scale': 1 / scale,
       }}
-      onDragOver={handleDragOver}
-      onDrop={handleDrop}
+      onDragOverCapture={handleDragOver}
+      onDropCapture={handleDrop}
       onMouseDown={handleCanvasMouseDown}
       onClick={handleCanvasClick}
       onContextMenu={handleCanvasContextMenu}
@@ -2555,8 +3457,98 @@ export function Canvas() {
               }}
             />
           ) : null}
+          {clusters.map((cluster) => (
+            (() => {
+              const bounds = getBoundsFromCluster(cluster)
+              const clusterName = cluster.name || cluster.title || 'Cluster'
+              const isSelected = selectedClusterId === cluster.id
+              return (
+                <div
+                  key={cluster.id}
+                  className={`canvas-cluster ${isSelected ? 'is-selected' : ''}`.trim()}
+                  style={{
+                    left: `${bounds.left}px`,
+                    top: `${bounds.top}px`,
+                    width: `${bounds.width}px`,
+                    height: `${bounds.height}px`,
+                  }}
+                  onMouseDown={(event) => handleClusterMouseDown(event, cluster)}
+                >
+                  <div className="canvas-cluster__header" onMouseDown={(event) => event.stopPropagation()}>
+                    {editingClusterId === cluster.id ? (
+                      <input
+                        className="canvas-cluster__title-input"
+                        value={editingTitle}
+                        onChange={(event) => setEditingTitle(event.target.value)}
+                        onBlur={handleClusterTitleInputBlur}
+                        onKeyDown={handleClusterTitleInputKeyDown}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        style={{ width: `${Math.max(64, Math.min(bounds.width - 54, (editingTitle.length + 2) * (7 / scale))) || 64}px` }}
+                        maxLength={80}
+                        autoFocus
+                      />
+                    ) : (
+                      <div className="canvas-cluster__title-wrap">
+                        <button
+                          type="button"
+                          className="canvas-cluster__title"
+                          onClick={(event) => handleStartClusterTitleEdit(event, cluster)}
+                          title={isCanvasLocked ? 'Unlock canvas to rename cluster' : 'Rename cluster'}
+                        >
+                          {clusterName}
+                        </button>
+                        <button
+                          type="button"
+                          className="canvas-cluster__edit-btn"
+                          onClick={(event) => handleStartClusterTitleEdit(event, cluster)}
+                          aria-label="Rename cluster"
+                          title="Rename cluster"
+                        >
+                          <Pencil size={12} strokeWidth={ICON_STROKE_WIDTH} />
+                        </button>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="canvas-cluster__menu-toggle"
+                      onClick={(event) => handleToggleClusterMenu(event, cluster.id)}
+                      aria-label="Cluster options"
+                      title="Cluster options"
+                    >
+                      <MoreHorizontal size={16} strokeWidth={ICON_STROKE_WIDTH} />
+                    </button>
+                    {openClusterMenuId === cluster.id ? (
+                      <div className="canvas-cluster__menu" onMouseDown={(event) => event.stopPropagation()}>
+                        <button type="button" className="canvas-cluster__menu-item" onClick={(event) => handleStartClusterTitleEdit(event, cluster)}>
+                          Rename
+                        </button>
+                        <button type="button" className="canvas-cluster__menu-item" onClick={(event) => handleUngroupCluster(event, cluster.id)}>
+                          Ungroup
+                        </button>
+                        <button type="button" className="canvas-cluster__menu-item" onClick={(event) => handleUngroupCluster(event, cluster.id)}>
+                          Delete Cluster
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })()
+          ))}
+          {clusterDraftRect && clusterDraftRect.width > 0 && clusterDraftRect.height > 0 ? (
+            <div
+              className="canvas-cluster canvas-cluster--draft"
+              style={{
+                left: `${clusterDraftRect.left}px`,
+                top: `${clusterDraftRect.top}px`,
+                width: `${clusterDraftRect.width}px`,
+                height: `${clusterDraftRect.height}px`,
+              }}
+            />
+          ) : null}
           {images.map((image) => {
             const size = getImageSize(image)
+            const renderSrc = getRenderableImageSrc(image.src)
             return (
               <div
                 key={image.id}
@@ -2570,23 +3562,25 @@ export function Canvas() {
                 }}
                 onMouseDown={(event) => handleImageMouseDown(event, image)}
               >
-                <img
-                  src={image.src}
-                  alt=""
-                  className="canvas-image"
-                  onLoad={(event) => {
-                    const element = event.currentTarget
-                    const width = element.naturalWidth || 0
-                    const height = element.naturalHeight || 0
-                    if (!width || !height) return
-                    setImageNaturalSizes((prev) => {
-                      const current = prev[image.id]
-                      if (current?.width === width && current?.height === height) return prev
-                      return { ...prev, [image.id]: { width, height } }
-                    })
-                  }}
-                  draggable={false}
-                />
+                {renderSrc ? (
+                  <img
+                    src={renderSrc}
+                    alt=""
+                    className="canvas-image"
+                    onLoad={(event) => {
+                      const element = event.currentTarget
+                      const width = element.naturalWidth || 0
+                      const height = element.naturalHeight || 0
+                      if (!width || !height) return
+                      setImageNaturalSizes((prev) => {
+                        const current = prev[image.id]
+                        if (current?.width === width && current?.height === height) return prev
+                        return { ...prev, [image.id]: { width, height } }
+                      })
+                    }}
+                    draggable={false}
+                  />
+                ) : null}
               </div>
             )
           })}
@@ -2607,18 +3601,12 @@ export function Canvas() {
               key={pin.commentId}
               type="button"
               className={`canvas-comment-pin ${activeCommentRef?.commentId === pin.commentId ? 'is-active' : ''} ${pin.isDraft ? 'is-draft' : ''}`.trim()}
-              style={{ left: `${pin.worldX}px`, top: `${pin.worldY}px`, zIndex: `${21 + pin.zIndex}`, '--comment-pin-color': pin.color }}
+              style={{ left: `${pin.worldX}px`, top: `${pin.worldY}px`, zIndex: `${21 + pin.zIndex}`, backgroundColor: pin.color }}
               onMouseDown={(event) => handleCommentPinMouseDown(event, pin.commentId)}
               onClick={(event) => handleCommentPinClick(event, pin.commentId)}
               title={pin.text ? `Comment: ${pin.text}` : 'Comment'}
               aria-label={pin.text ? 'Comment with text' : 'Comment draft'}
-            >
-              <span className="canvas-comment-pin__glyph" aria-hidden="true">
-                <svg viewBox="0 0 20 20" focusable="false">
-                  <path d="M4 3h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-4.2 3.3A1 1 0 0 1 3 16.5V14a2 2 0 0 1-1-1.7V5a2 2 0 0 1 2-2z" />
-                </svg>
-              </span>
-            </button>
+            />
           ))}
           {selectedImage ? resizeHandleDefs.map((handleDef) => (
             <button
@@ -2962,4 +3950,7 @@ export function Canvas() {
     </div>
   )
 }
+
+
+
 
