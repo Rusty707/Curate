@@ -9,6 +9,7 @@ import {
   Clipboard,
   Crop,
   Download,
+  ExternalLink,
   Grid2x2,
   Check,
   LayoutGrid,
@@ -43,7 +44,7 @@ const MIN_CROP_RECT_SIZE = 16
 const MAGNETIC_SNAP_EDGE_THRESHOLD = 48
 const MENU_ICON_SIZE = 18
 const ICON_STROKE_WIDTH = 2.3
-const SMART_SNAP_THRESHOLD = 5
+const SMART_SNAP_THRESHOLD = 4
 const ZIP_FILE_SIGNATURE = 0x04034b50
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50
 const ZIP_END_SIGNATURE = 0x06054b50
@@ -62,6 +63,9 @@ const PALETTE_MAX_COLORS = 12
 const PALETTE_SAMPLE_SIZE = 48
 const PALETTE_MAX_SAMPLES = 12000
 const PALETTE_SIMILARITY_DELTA = 24
+const LINK_THUMBNAIL_DEFAULT_WIDTH = 304
+const LINK_THUMBNAIL_DEFAULT_HEIGHT = 214
+const LINK_METADATA_CACHE_KEY = 'kanvaref:link-meta-cache-v1'
 
 function normalizeImageComment(comment) {
   if (!comment || typeof comment !== 'object') return null
@@ -144,6 +148,7 @@ function makeImageItem(src, x, y, width, height) {
   return {
     id: nanoid(),
     type: 'image',
+    isTransformable: true,
     src,
     originalSrc: src,
     originalWidth: width,
@@ -168,6 +173,7 @@ function normalizeImageItem(image) {
     ...image,
     id: typeof image.id === 'string' && image.id ? image.id : crypto.randomUUID(),
     type: 'image',
+    isTransformable: true,
     originalSrc: image.originalSrc || image.src,
     originalWidth: typeof image.originalWidth === 'number' ? image.originalWidth : width,
     originalHeight: typeof image.originalHeight === 'number' ? image.originalHeight : height,
@@ -191,12 +197,49 @@ function normalizePaletteItem(palette) {
   if (colors.length === 0) return null
   return {
     id: typeof palette.id === 'string' && palette.id ? palette.id : crypto.randomUUID(),
+    type: 'palette',
+    isTransformable: false,
     x: typeof palette.x === 'number' ? palette.x : 0,
     y: typeof palette.y === 'number' ? palette.y : 0,
     colors,
     magneticGroupId: typeof palette.magneticGroupId === 'string' && palette.magneticGroupId ? palette.magneticGroupId : null,
     createdFromGroupId: typeof palette.createdFromGroupId === 'string' && palette.createdFromGroupId ? palette.createdFromGroupId : null,
     createdAt: typeof palette.createdAt === 'number' ? palette.createdAt : Date.now(),
+  }
+}
+
+function normalizeLinkThumbnailItem(item) {
+  if (!item || typeof item !== 'object') return null
+  const hrefRaw = typeof item.href === 'string' ? item.href.trim() : ''
+  let href = ''
+  try {
+    const parsed = new URL(hrefRaw)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') href = parsed.toString()
+  } catch {
+    href = ''
+  }
+  if (!href) return null
+  const domain = typeof item.domain === 'string' && item.domain.trim()
+    ? item.domain.trim()
+    : new URL(href).hostname.replace(/^www\./, '')
+  const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : href
+  const imageUrl = typeof item.imageUrl === 'string' && item.imageUrl.trim() ? item.imageUrl.trim() : ''
+  return {
+    id: typeof item.id === 'string' && item.id ? item.id : crypto.randomUUID(),
+    type: 'link-thumbnail',
+    isTransformable: false,
+    x: typeof item.x === 'number' ? item.x : 0,
+    y: typeof item.y === 'number' ? item.y : 0,
+    width: LINK_THUMBNAIL_DEFAULT_WIDTH,
+    height: LINK_THUMBNAIL_DEFAULT_HEIGHT,
+    imageUrl,
+    title,
+    domain,
+    href,
+    siteName: typeof item.siteName === 'string' && item.siteName.trim() ? item.siteName.trim() : domain,
+    isLoading: Boolean(item.isLoading),
+    magneticGroupId: typeof item.magneticGroupId === 'string' && item.magneticGroupId ? item.magneticGroupId : null,
+    createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
   }
 }
 
@@ -434,6 +477,7 @@ function serializePalettesForStorage(palettes) {
     .filter(Boolean)
     .map((palette) => ({
       id: palette.id,
+      type: 'palette',
       x: palette.x,
       y: palette.y,
       colors: palette.colors,
@@ -443,11 +487,31 @@ function serializePalettesForStorage(palettes) {
     }))
 }
 
-function rehydrateBoardState(images, comments, palettes) {
+function serializeLinkThumbnailsForStorage(thumbnails) {
+  return (Array.isArray(thumbnails) ? thumbnails : [])
+    .map(normalizeLinkThumbnailItem)
+    .filter(Boolean)
+    .map((item) => ({
+      id: item.id,
+      type: 'link-thumbnail',
+      x: item.x,
+      y: item.y,
+      href: item.href,
+      imageUrl: item.imageUrl,
+      title: item.title,
+      domain: item.domain,
+      siteName: item.siteName,
+      magneticGroupId: item.magneticGroupId ?? null,
+      createdAt: item.createdAt,
+    }))
+}
+
+function rehydrateBoardState(images, comments, palettes, linkThumbnails) {
   return {
     images: (Array.isArray(images) ? images : []).map(normalizeImageItem).filter(Boolean),
     comments: (Array.isArray(comments) ? comments : []).map(normalizeBoardComment).filter(Boolean),
     palettes: (Array.isArray(palettes) ? palettes : []).map(normalizePaletteItem).filter(Boolean),
+    linkThumbnails: (Array.isArray(linkThumbnails) ? linkThumbnails : []).map(normalizeLinkThumbnailItem).filter(Boolean),
   }
 }
 
@@ -468,7 +532,7 @@ function serializeCommentsForStorage(comments) {
 }
 
 function parseCanvasObjects(objects) {
-  if (!Array.isArray(objects)) return { images: [], comments: [], palettes: [] }
+  if (!Array.isArray(objects)) return { images: [], comments: [], palettes: [], linkThumbnails: [] }
   const normalized = objects
     .map((object, index) => ({
       id: typeof object?.id === 'string' ? object.id : crypto.randomUUID(),
@@ -531,17 +595,18 @@ function parseCanvasObjects(objects) {
     images: images.filter(Boolean),
     comments: comments.filter(Boolean),
     palettes: [],
+    linkThumbnails: [],
   }
 }
 
 function parseBoardState(raw) {
-  if (!raw) return { images: [], comments: [], palettes: [] }
+  if (!raw) return { images: [], comments: [], palettes: [], linkThumbnails: [] }
   try {
     const parsed = JSON.parse(raw)
     if (Array.isArray(parsed)) {
       const images = parsed.map(normalizeImageItem)
       const comments = deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
-      return rehydrateBoardState(images, comments, [])
+      return rehydrateBoardState(images, comments, [], [])
     }
     if (parsed && typeof parsed === 'object') {
       if (Array.isArray(parsed.objects) && parsed.objects.length > 0) {
@@ -551,22 +616,29 @@ function parseBoardState(raw) {
           ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
           : deriveBoardCommentsFromImages(fallbackImages).map(normalizeBoardComment).filter(Boolean)
         const fallbackPalettes = Array.isArray(parsed.palettes) ? parsed.palettes.map(normalizePaletteItem).filter(Boolean) : []
+        const fallbackLinkThumbnails = Array.isArray(parsed.linkThumbnails)
+          ? parsed.linkThumbnails.map(normalizeLinkThumbnailItem).filter(Boolean)
+          : []
         const images = parsedObjects.images.length > 0 ? parsedObjects.images : fallbackImages
         const comments = parsedObjects.comments.length > 0 ? parsedObjects.comments : fallbackComments
         const palettes = parsedObjects.palettes.length > 0 ? parsedObjects.palettes : fallbackPalettes
-        return rehydrateBoardState(images, comments, palettes)
+        const linkThumbnails = parsedObjects.linkThumbnails.length > 0 ? parsedObjects.linkThumbnails : fallbackLinkThumbnails
+        return rehydrateBoardState(images, comments, palettes, linkThumbnails)
       }
       const images = Array.isArray(parsed.images) ? parsed.images.map(normalizeImageItem) : []
       const comments = Array.isArray(parsed.comments)
         ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
         : deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
       const palettes = Array.isArray(parsed.palettes) ? parsed.palettes.map(normalizePaletteItem).filter(Boolean) : []
-      return rehydrateBoardState(images, comments, palettes)
+      const linkThumbnails = Array.isArray(parsed.linkThumbnails)
+        ? parsed.linkThumbnails.map(normalizeLinkThumbnailItem).filter(Boolean)
+        : []
+      return rehydrateBoardState(images, comments, palettes, linkThumbnails)
     }
   } catch {
-    return { images: [], comments: [], palettes: [] }
+    return { images: [], comments: [], palettes: [], linkThumbnails: [] }
   }
-  return { images: [], comments: [], palettes: [] }
+  return { images: [], comments: [], palettes: [], linkThumbnails: [] }
 }
 
 function fitWithinMax(width, height, maxSize = DEFAULT_IMAGE_MAX) {
@@ -586,12 +658,53 @@ function getPaletteSize(palette) {
   const count = Math.max(1, Array.isArray(palette?.colors) ? palette.colors.length : 0)
   const columns = Math.min(6, Math.max(3, Math.ceil(Math.sqrt(count))))
   const swatchSize = 24
-  const gap = 8
   const padding = 10
+  const gap = 8
   const rows = Math.ceil(count / columns)
   const width = padding * 2 + columns * swatchSize + (columns - 1) * gap
   const height = padding * 2 + rows * swatchSize + (rows - 1) * gap
   return { width, height, columns, rows, swatchSize, gap, padding }
+}
+
+function getLinkThumbnailSize(item) {
+  return {
+    width: typeof item?.width === 'number' ? item.width : LINK_THUMBNAIL_DEFAULT_WIDTH,
+    height: typeof item?.height === 'number' ? item.height : LINK_THUMBNAIL_DEFAULT_HEIGHT,
+  }
+}
+
+function getBoundsFromLinkThumbnail(item, x = item.x, y = item.y) {
+  const size = getLinkThumbnailSize(item)
+  return {
+    left: x,
+    top: y,
+    right: x + size.width,
+    bottom: y + size.height,
+    width: size.width,
+    height: size.height,
+  }
+}
+
+function sanitizeExternalUrl(raw) {
+  if (typeof raw !== 'string') return null
+  try {
+    const url = new URL(raw.trim())
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function parseFirstUrlFromText(raw) {
+  if (typeof raw !== 'string') return null
+  const match = raw.match(/https?:\/\/[^\s<>"']+/i)
+  if (!match) return null
+  return sanitizeExternalUrl(match[0])
+}
+
+function isTransformableEntity(entity) {
+  return entity?.isTransformable !== false
 }
 
 function getBoundsFromPalette(palette, x = palette.x, y = palette.y) {
@@ -603,6 +716,20 @@ function getBoundsFromPalette(palette, x = palette.x, y = palette.y) {
     bottom: y + size.height,
     width: size.width,
     height: size.height,
+  }
+}
+
+function getBoundsFromCanvasEntity(entity, naturalSize) {
+  if (!entity) return null
+  if (entity.type === 'palette') return getBoundsFromPalette(entity)
+  const bounds = getRenderedImageBounds(entity, naturalSize)
+  return {
+    left: bounds.x,
+    top: bounds.y,
+    right: bounds.x + bounds.width,
+    bottom: bounds.y + bounds.height,
+    width: bounds.width,
+    height: bounds.height,
   }
 }
 
@@ -658,18 +785,49 @@ function snapToGrid(value, gridSize) {
   return Math.round(value / gridSize) * gridSize
 }
 
-function getDraggedGroupBounds(images, draggedIds, initialPositions, dx, dy) {
+function getDraggedGroupBounds(images, palettes, linkThumbnails, draggedImageIds, draggedPaletteIds, draggedLinkIds, initialPositions, dx, dy) {
   const imageMap = new Map(images.map((image) => [image.id, image]))
+  const paletteMap = new Map(palettes.map((palette) => [palette.id, palette]))
+  const linkMap = new Map(linkThumbnails.map((item) => [item.id, item]))
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
 
-  for (const id of draggedIds) {
+  for (const id of draggedImageIds) {
     const image = imageMap.get(id)
     const start = initialPositions[id]
     if (!image || !start) continue
     const size = getImageSize(image)
+    const left = start.x + dx
+    const top = start.y + dy
+    const right = left + size.width
+    const bottom = top + size.height
+    minX = Math.min(minX, left)
+    minY = Math.min(minY, top)
+    maxX = Math.max(maxX, right)
+    maxY = Math.max(maxY, bottom)
+  }
+
+  for (const id of draggedPaletteIds) {
+    const palette = paletteMap.get(id)
+    const start = initialPositions[id]
+    if (!palette || !start) continue
+    const size = getPaletteSize(palette)
+    const left = start.x + dx
+    const top = start.y + dy
+    const right = left + size.width
+    const bottom = top + size.height
+    minX = Math.min(minX, left)
+    minY = Math.min(minY, top)
+    maxX = Math.max(maxX, right)
+    maxY = Math.max(maxY, bottom)
+  }
+  for (const id of draggedLinkIds) {
+    const item = linkMap.get(id)
+    const start = initialPositions[id]
+    if (!item || !start) continue
+    const size = getLinkThumbnailSize(item)
     const left = start.x + dx
     const top = start.y + dy
     const right = left + size.width
@@ -730,9 +888,23 @@ function expandIdsWithPersistentGroups(ids, images) {
   return [...expanded]
 }
 
-function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_THRESHOLD) {
-  const draggedSet = new Set(dragState.draggedIds)
-  const draggedBounds = getDraggedGroupBounds(images, dragState.draggedIds, dragState.initialPositions, dx, dy)
+function getSmartSnapResult(images, palettes, linkThumbnails, dragState, dx, dy, threshold = SMART_SNAP_THRESHOLD) {
+  const draggedImageSet = new Set(dragState.draggedIds ?? [])
+  const draggedPaletteIds = Object.keys(dragState.initialPalettePositions ?? {})
+  const draggedLinkIds = Object.keys(dragState.initialLinkThumbnailPositions ?? {})
+  const draggedPaletteSet = new Set(draggedPaletteIds)
+  const draggedLinkSet = new Set(draggedLinkIds)
+  const draggedBounds = getDraggedGroupBounds(
+    images,
+    palettes,
+    linkThumbnails,
+    [...draggedImageSet],
+    draggedPaletteIds,
+    draggedLinkIds,
+    { ...dragState.initialPositions, ...(dragState.initialPalettePositions ?? {}), ...(dragState.initialLinkThumbnailPositions ?? {}) },
+    dx,
+    dy,
+  )
   if (!draggedBounds) {
     return { dx, dy, guides: { vertical: null, horizontal: null } }
   }
@@ -743,17 +915,52 @@ function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_TH
   let bestX = null
   let bestY = null
 
-  for (const image of images) {
-    if (draggedSet.has(image.id)) continue
-    const size = getImageSize(image)
-    const targetBounds = {
-      left: image.x,
-      top: image.y,
-      right: image.x + size.width,
-      bottom: image.y + size.height,
-      centerX: image.x + size.width / 2,
-      centerY: image.y + size.height / 2,
-    }
+  const targetEntities = [
+    ...images.map((image) => {
+      const size = getImageSize(image)
+      return {
+        id: image.id,
+        type: 'image',
+        left: image.x,
+        top: image.y,
+        right: image.x + size.width,
+        bottom: image.y + size.height,
+        centerX: image.x + size.width / 2,
+        centerY: image.y + size.height / 2,
+      }
+    }),
+    ...palettes.map((palette) => {
+      const size = getPaletteSize(palette)
+      return {
+        id: palette.id,
+        type: 'palette',
+        left: palette.x,
+        top: palette.y,
+        right: palette.x + size.width,
+        bottom: palette.y + size.height,
+        centerX: palette.x + size.width / 2,
+        centerY: palette.y + size.height / 2,
+      }
+    }),
+    ...linkThumbnails.map((item) => {
+      const size = getLinkThumbnailSize(item)
+      return {
+        id: item.id,
+        type: 'link-thumbnail',
+        left: item.x,
+        top: item.y,
+        right: item.x + size.width,
+        bottom: item.y + size.height,
+        centerX: item.x + size.width / 2,
+        centerY: item.y + size.height / 2,
+      }
+    }),
+  ]
+
+  for (const targetBounds of targetEntities) {
+    if (targetBounds.type === 'image' && draggedImageSet.has(targetBounds.id)) continue
+    if (targetBounds.type === 'palette' && draggedPaletteSet.has(targetBounds.id)) continue
+    if (targetBounds.type === 'link-thumbnail' && draggedLinkSet.has(targetBounds.id)) continue
 
     const xCandidates = [
       { delta: targetBounds.left - draggedBounds.minX, target: targetBounds.left, targetBounds, type: 'left-left' },
@@ -784,7 +991,17 @@ function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_TH
 
   const nextDx = dx + (bestX ? bestX.delta : 0)
   const nextDy = dy + (bestY ? bestY.delta : 0)
-  const adjustedBounds = getDraggedGroupBounds(images, dragState.draggedIds, dragState.initialPositions, nextDx, nextDy)
+  const adjustedBounds = getDraggedGroupBounds(
+    images,
+    palettes,
+    linkThumbnails,
+    [...draggedImageSet],
+    draggedPaletteIds,
+    draggedLinkIds,
+    { ...dragState.initialPositions, ...(dragState.initialPalettePositions ?? {}), ...(dragState.initialLinkThumbnailPositions ?? {}) },
+    nextDx,
+    nextDy,
+  )
 
   return {
     dx: nextDx,
@@ -793,17 +1010,17 @@ function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_TH
       vertical:
         bestX && adjustedBounds
           ? {
-              x: bestX.target,
-              top: Math.min(adjustedBounds.minY, bestX.targetBounds.top),
-              bottom: Math.max(adjustedBounds.maxY, bestX.targetBounds.bottom),
+              x: Math.round(bestX.target),
+              top: Math.round(Math.min(adjustedBounds.minY, bestX.targetBounds.top)),
+              bottom: Math.round(Math.max(adjustedBounds.maxY, bestX.targetBounds.bottom)),
             }
           : null,
       horizontal:
         bestY && adjustedBounds
           ? {
-              y: bestY.target,
-              left: Math.min(adjustedBounds.minX, bestY.targetBounds.left),
-              right: Math.max(adjustedBounds.maxX, bestY.targetBounds.right),
+              y: Math.round(bestY.target),
+              left: Math.round(Math.min(adjustedBounds.minX, bestY.targetBounds.left)),
+              right: Math.round(Math.max(adjustedBounds.maxX, bestY.targetBounds.right)),
             }
           : null,
     },
@@ -976,11 +1193,13 @@ export function Canvas() {
   const [images, setImages] = useState([])
   const [comments, setComments] = useState([])
   const [palettes, setPalettes] = useState([])
+  const [linkThumbnails, setLinkThumbnails] = useState([])
   const [scale, setScale] = useState(1)
   const [offsetX, setOffsetX] = useState(0)
   const [offsetY, setOffsetY] = useState(0)
   const [selectedImageIds, setSelectedImageIds] = useState([])
   const [selectedPaletteIds, setSelectedPaletteIds] = useState([])
+  const [selectedLinkThumbnailIds, setSelectedLinkThumbnailIds] = useState([])
   const [dragState, setDragState] = useState(null)
   const [paletteDragState, setPaletteDragState] = useState(null)
   const [commentDragState, setCommentDragState] = useState(null)
@@ -1043,8 +1262,12 @@ export function Canvas() {
   const imagesRef = useRef(images)
   const commentsRef = useRef(comments)
   const palettesRef = useRef(palettes)
+  const linkThumbnailsRef = useRef(linkThumbnails)
   const selectedIdsRef = useRef(selectedImageIds)
   const selectedPaletteIdsRef = useRef(selectedPaletteIds)
+  const selectedLinkThumbnailIdsRef = useRef(selectedLinkThumbnailIds)
+  const linkMetadataCacheRef = useRef(new Map())
+  const linkPasteDebounceRef = useRef(null)
   const historyRef = useRef(history)
   const futureRef = useRef(future)
   const applyCropByRectRef = useRef(null)
@@ -1055,8 +1278,10 @@ export function Canvas() {
     setImages([])
     setComments([])
     setPalettes([])
+    setLinkThumbnails([])
     setSelectedImageIds([])
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setHistory([])
     setFuture([])
     setScale(1)
@@ -1091,8 +1316,10 @@ export function Canvas() {
     imagesRef.current = []
     commentsRef.current = []
     palettesRef.current = []
+    linkThumbnailsRef.current = []
     selectedIdsRef.current = []
     selectedPaletteIdsRef.current = []
+    selectedLinkThumbnailIdsRef.current = []
     historyRef.current = []
     futureRef.current = []
     scaleRef.current = 1
@@ -1125,6 +1352,7 @@ export function Canvas() {
       )
       setComments(Array.isArray(parsed.comments) ? parsed.comments : [])
       setPalettes(Array.isArray(parsed.palettes) ? parsed.palettes : [])
+      setLinkThumbnails(Array.isArray(parsed.linkThumbnails) ? parsed.linkThumbnails : [])
       setImages(hydratedImages)
       console.log('[Curate] Hydrated board once', {
         imagesCount: hydratedImages.length,
@@ -1154,6 +1382,9 @@ export function Canvas() {
     palettesRef.current = palettes
   }, [palettes])
   useEffect(() => {
+    linkThumbnailsRef.current = linkThumbnails
+  }, [linkThumbnails])
+  useEffect(() => {
     const previous = previousImageSrcsRef.current
     const next = new Map(images.map((image) => [image.id, image.src]))
     for (const [id, prevSrc] of previous.entries()) {
@@ -1180,6 +1411,9 @@ export function Canvas() {
   useEffect(() => {
     selectedPaletteIdsRef.current = selectedPaletteIds
   }, [selectedPaletteIds])
+  useEffect(() => {
+    selectedLinkThumbnailIdsRef.current = selectedLinkThumbnailIds
+  }, [selectedLinkThumbnailIds])
   useEffect(() => {
     historyRef.current = history
   }, [history])
@@ -1304,6 +1538,7 @@ export function Canvas() {
         images: serializeImagesForStorage(images),
         comments: serializeCommentsForStorage(comments),
         palettes: serializePalettesForStorage(palettes),
+        linkThumbnails: serializeLinkThumbnailsForStorage(linkThumbnails),
       }
       persistCountRef.current += 1
       console.log('[Curate] Persisting board state', { persistCount: persistCountRef.current, imageCount: boardState.images.length })
@@ -1318,7 +1553,7 @@ export function Canvas() {
     } catch (error) {
       console.error('[Curate] Failed to persist board:', error)
     }
-  }, [images, comments, palettes, boardStorageKey, legacyStorageKey])
+  }, [images, comments, palettes, linkThumbnails, boardStorageKey, legacyStorageKey])
 
   useEffect(() => {
     console.log('[Curate] Loaded board state', {
@@ -1344,10 +1579,22 @@ export function Canvas() {
     localStorage.setItem(imageSnappingStorageKey, String(isImageSnappingEnabled))
   }, [imageSnappingStorageKey, isImageSnappingEnabled])
 
-  function commitHistory(previousImages, previousSelected, previousComments = commentsRef.current, previousPalettes = palettesRef.current) {
+  function commitHistory(
+    previousImages,
+    previousSelected,
+    previousComments = commentsRef.current,
+    previousPalettes = palettesRef.current,
+    previousLinkThumbnails = linkThumbnailsRef.current,
+  ) {
     // Called only for meaningful operations, so push this snapshot directly.
     setHistory((prev) => {
-      const next = [...prev, { images: previousImages, comments: previousComments, palettes: previousPalettes, selectedImageIds: previousSelected }]
+      const next = [...prev, {
+        images: previousImages,
+        comments: previousComments,
+        palettes: previousPalettes,
+        linkThumbnails: previousLinkThumbnails,
+        selectedImageIds: previousSelected,
+      }]
       return next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next
     })
     setFuture([])
@@ -1359,6 +1606,7 @@ export function Canvas() {
       JSON.stringify(snapshot.images) !== JSON.stringify(imagesRef.current) ||
       JSON.stringify(snapshot.comments ?? commentsRef.current) !== JSON.stringify(commentsRef.current) ||
       JSON.stringify(snapshot.palettes ?? palettesRef.current) !== JSON.stringify(palettesRef.current) ||
+      JSON.stringify(snapshot.linkThumbnails ?? linkThumbnailsRef.current) !== JSON.stringify(linkThumbnailsRef.current) ||
       JSON.stringify(snapshot.selectedImageIds) !== JSON.stringify(selectedIdsRef.current)
     )
   }
@@ -1432,7 +1680,13 @@ export function Canvas() {
     setCropMode({
       id: imageId,
       rect: { x: image.x, y: image.y, width: size.width, height: size.height },
-      historySnapshot: { images: imagesRef.current, selectedImageIds: selectedIdsRef.current },
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        palettes: palettesRef.current,
+        linkThumbnails: linkThumbnailsRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
     })
     setMenuState(null)
   }
@@ -1544,7 +1798,13 @@ export function Canvas() {
     const prevHistory = historyRef.current
     if (prevHistory.length === 0) return false
     const previousState = prevHistory[prevHistory.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, palettes: palettesRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = {
+      images: imagesRef.current,
+      comments: commentsRef.current,
+      palettes: palettesRef.current,
+      linkThumbnails: linkThumbnailsRef.current,
+      selectedImageIds: selectedIdsRef.current,
+    }
     const nextHistory = prevHistory.slice(0, -1)
     const nextFuture = [...futureRef.current, currentState]
     const clampedFuture = nextFuture.length > HISTORY_LIMIT ? nextFuture.slice(nextFuture.length - HISTORY_LIMIT) : nextFuture
@@ -1555,8 +1815,10 @@ export function Canvas() {
     setImages(previousState.images)
     setComments(previousState.comments ?? commentsRef.current)
     setPalettes(previousState.palettes ?? palettesRef.current)
+    setLinkThumbnails(previousState.linkThumbnails ?? linkThumbnailsRef.current)
     setSelectedImageIds(previousState.selectedImageIds)
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setMenuState(null)
     return true
   }
@@ -1565,7 +1827,13 @@ export function Canvas() {
     const prevFuture = futureRef.current
     if (prevFuture.length === 0) return false
     const nextState = prevFuture[prevFuture.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, palettes: palettesRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = {
+      images: imagesRef.current,
+      comments: commentsRef.current,
+      palettes: palettesRef.current,
+      linkThumbnails: linkThumbnailsRef.current,
+      selectedImageIds: selectedIdsRef.current,
+    }
     const nextFuture = prevFuture.slice(0, -1)
     const nextHistory = [...historyRef.current, currentState]
     const clampedHistory = nextHistory.length > HISTORY_LIMIT ? nextHistory.slice(nextHistory.length - HISTORY_LIMIT) : nextHistory
@@ -1576,8 +1844,10 @@ export function Canvas() {
     setImages(nextState.images)
     setComments(nextState.comments ?? commentsRef.current)
     setPalettes(nextState.palettes ?? palettesRef.current)
+    setLinkThumbnails(nextState.linkThumbnails ?? linkThumbnailsRef.current)
     setSelectedImageIds(nextState.selectedImageIds)
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setMenuState(null)
     return true
   }
@@ -1778,7 +2048,7 @@ export function Canvas() {
     }
     window.addEventListener('curate:toolbar-action', handleToolbarAction)
     return () => window.removeEventListener('curate:toolbar-action', handleToolbarAction)
-  }, [isCommentMode, isCanvasLocked, isMagneticSnapEnabled, offsetX, offsetY, scale, images])
+  }, [isCommentMode, isCanvasLocked, isMagneticSnapEnabled, offsetX, offsetY, scale, images, palettes, linkThumbnails])
 
   function buildPaletteCopyText(colors, format) {
     if (!Array.isArray(colors) || colors.length === 0) return ''
@@ -1821,24 +2091,29 @@ export function Canvas() {
   function deleteSelectedCanvasItems() {
     const imageIds = selectedIdsRef.current
     const paletteIds = selectedPaletteIdsRef.current
-    if (imageIds.length === 0 && paletteIds.length === 0) return
+    const linkIds = selectedLinkThumbnailIdsRef.current
+    if (imageIds.length === 0 && paletteIds.length === 0 && linkIds.length === 0) return
     if (!canTransform) {
       showLockBlockedFeedback()
       return
     }
     const imageDeleteSet = new Set(imageIds)
     const paletteDeleteSet = new Set(paletteIds)
+    const linkDeleteSet = new Set(linkIds)
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
     const prevComments = commentsRef.current
     const prevPalettes = palettesRef.current
+    const prevLinkThumbnails = linkThumbnailsRef.current
     const imagesToDelete = prevImages.filter((image) => imageDeleteSet.has(image.id))
     setImages((prev) => prev.filter((image) => !imageDeleteSet.has(image.id)))
     setPalettes((prev) => prev.filter((palette) => !paletteDeleteSet.has(palette.id)))
+    setLinkThumbnails((prev) => prev.filter((item) => !linkDeleteSet.has(item.id)))
     setSelectedImageIds([])
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setMenuState(null)
-    commitHistory(prevImages, prevSelected, prevComments, prevPalettes)
+    commitHistory(prevImages, prevSelected, prevComments, prevPalettes, prevLinkThumbnails)
     void Promise.all(imagesToDelete.map((image) => deleteImageBlobById(image.id))).catch(() => {
       // Ignore blob cleanup failure; metadata removal is already complete.
     })
@@ -1846,7 +2121,7 @@ export function Canvas() {
 
   useEffect(() => {
     function handleDelete(event) {
-      if (selectedImageIds.length === 0 && selectedPaletteIds.length === 0) return
+      if (selectedImageIds.length === 0 && selectedPaletteIds.length === 0 && selectedLinkThumbnailIds.length === 0) return
       if (event.key !== 'Delete' && event.key !== 'Backspace') return
       if (isTypingTarget(event.target)) return
       event.preventDefault()
@@ -1854,7 +2129,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', handleDelete)
     return () => window.removeEventListener('keydown', handleDelete)
-  }, [canTransform, selectedImageIds, selectedPaletteIds])
+  }, [canTransform, selectedImageIds, selectedPaletteIds, selectedLinkThumbnailIds])
 
   useEffect(() => {
     if (!isCanvasLocked) return
@@ -1929,6 +2204,120 @@ export function Canvas() {
     return { x: (rect.width / 2 - offsetX) / scale, y: (rect.height / 2 - offsetY) / scale }
   }
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LINK_METADATA_CACHE_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return
+      const next = new Map()
+      for (const [href, data] of Object.entries(parsed)) {
+        if (!sanitizeExternalUrl(href)) continue
+        if (!data || typeof data !== 'object') continue
+        next.set(href, data)
+      }
+      linkMetadataCacheRef.current = next
+    } catch {
+      // Ignore invalid cached metadata.
+    }
+  }, [])
+
+  function persistLinkMetadataCache() {
+    try {
+      const entries = Array.from(linkMetadataCacheRef.current.entries()).slice(-120)
+      const payload = Object.fromEntries(entries)
+      localStorage.setItem(LINK_METADATA_CACHE_KEY, JSON.stringify(payload))
+    } catch {
+      // Ignore cache persistence failures.
+    }
+  }
+
+  async function fetchLinkMetadata(href) {
+    const cached = linkMetadataCacheRef.current.get(href)
+    if (cached) return cached
+    const response = await fetch(`/api/link-metadata?url=${encodeURIComponent(href)}`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    })
+    if (!response.ok) throw new Error('metadata fetch failed')
+    const payload = await response.json()
+    const normalized = {
+      href: sanitizeExternalUrl(payload?.href || href) || href,
+      imageUrl: typeof payload?.imageUrl === 'string' ? payload.imageUrl : '',
+      title: typeof payload?.title === 'string' && payload.title.trim() ? payload.title.trim() : href,
+      domain: typeof payload?.domain === 'string' && payload.domain.trim() ? payload.domain.trim() : new URL(href).hostname.replace(/^www\./, ''),
+      siteName: typeof payload?.siteName === 'string' && payload.siteName.trim() ? payload.siteName.trim() : '',
+    }
+    linkMetadataCacheRef.current.set(href, normalized)
+    persistLinkMetadataCache()
+    return normalized
+  }
+
+  async function createLinkThumbnailFromUrl(href) {
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return false
+    }
+    const center = getViewportCenterPoint()
+    if (!center) return false
+    const offset = pasteCount * PASTE_OFFSET_STEP
+    const id = crypto.randomUUID()
+    const placeholder = normalizeLinkThumbnailItem({
+      id,
+      href,
+      x: center.x + offset,
+      y: center.y + offset,
+      imageUrl: '',
+      title: 'Loading preview...',
+      domain: new URL(href).hostname.replace(/^www\./, ''),
+      siteName: '',
+      isLoading: true,
+      magneticGroupId: null,
+      createdAt: Date.now(),
+    })
+    if (!placeholder) return false
+    const prevImages = imagesRef.current
+    const prevSelected = selectedIdsRef.current
+    const prevComments = commentsRef.current
+    const prevPalettes = palettesRef.current
+    const prevLinks = linkThumbnailsRef.current
+    setLinkThumbnails((prev) => [...prev, placeholder])
+    setSelectedImageIds([])
+    setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([placeholder.id])
+    setPasteCount((prev) => prev + 1)
+    setMenuState(null)
+    commitHistory(prevImages, prevSelected, prevComments, prevPalettes, prevLinks)
+    void fetchLinkMetadata(href)
+      .then((metadata) => {
+        setLinkThumbnails((prev) =>
+          prev.map((item) =>
+            item.id === placeholder.id
+              ? {
+                  ...item,
+                  href: metadata.href,
+                  imageUrl: metadata.imageUrl,
+                  title: metadata.title,
+                  domain: metadata.domain,
+                  siteName: metadata.siteName || metadata.domain,
+                  isLoading: false,
+                }
+              : item,
+          ),
+        )
+      })
+      .catch(() => {
+        setLinkThumbnails((prev) =>
+          prev.map((item) =>
+            item.id === placeholder.id
+              ? { ...item, title: item.domain || 'Preview unavailable', isLoading: false }
+              : item,
+          ),
+        )
+      })
+    return true
+  }
+
 async function createImagesFromFiles(files, baseX, baseY) {
   const localImages = await Promise.all(
     files.map(async (file) => {
@@ -1975,6 +2364,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     setImages((prev) => [...prev, ...newImages])
     setSelectedImageIds(newImages.map((image) => image.id))
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setPasteCount((prev) => prev + 1)
     setMenuState(null)
     commitHistory(prevImages, prevSelected)
@@ -2002,6 +2392,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     setImages((prev) => [...prev, ...pasted])
     setSelectedImageIds(pasted.map((image) => image.id))
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setPasteCount((prev) => prev + 1)
     setMenuState(null)
     commitHistory(prevImages, prevSelected)
@@ -2017,13 +2408,30 @@ async function createImagesFromFiles(files, baseX, baseY) {
         await pasteFilesFromClipboard(files)
         return
       }
+      const pastedText = event.clipboardData?.getData('text/plain') || ''
+      const pastedUrl = parseFirstUrlFromText(pastedText)
+      if (pastedUrl) {
+        event.preventDefault()
+        if (linkPasteDebounceRef.current) window.clearTimeout(linkPasteDebounceRef.current)
+        linkPasteDebounceRef.current = window.setTimeout(() => {
+          void createLinkThumbnailFromUrl(pastedUrl)
+          linkPasteDebounceRef.current = null
+        }, 120)
+        return
+      }
       if (internalClipboard?.items?.length) {
         event.preventDefault()
         pasteFromInternalClipboard()
       }
     }
     window.addEventListener('paste', handlePaste)
-    return () => window.removeEventListener('paste', handlePaste)
+    return () => {
+      window.removeEventListener('paste', handlePaste)
+      if (linkPasteDebounceRef.current) {
+        window.clearTimeout(linkPasteDebounceRef.current)
+        linkPasteDebounceRef.current = null
+      }
+    }
   }, [internalClipboard, pasteCount, offsetX, offsetY, scale])
 
   async function getSystemClipboardImage() {
@@ -2057,13 +2465,21 @@ async function createImagesFromFiles(files, baseX, baseY) {
   async function checkPasteAvailabilityOnMenuOpen() {
     const hasInternal = Boolean(internalClipboard?.items?.length)
     setIsPasteAvailable(hasInternal)
-    if (!window.isSecureContext || !navigator.clipboard?.read) return
+    if (!window.isSecureContext || (!navigator.clipboard?.read && !navigator.clipboard?.readText)) return
     try {
-      const items = await navigator.clipboard.read()
-      const hasSupportedImage = items.some((item) =>
-        item.types.some((type) => PASTE_IMAGE_MIME_TYPES.has(type)),
-      )
-      setIsPasteAvailable(hasInternal || hasSupportedImage)
+      let hasSupportedImage = false
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read()
+        hasSupportedImage = items.some((item) =>
+          item.types.some((type) => PASTE_IMAGE_MIME_TYPES.has(type)),
+        )
+      }
+      let hasUrl = false
+      if (navigator.clipboard?.readText) {
+        const text = await navigator.clipboard.readText()
+        hasUrl = Boolean(parseFirstUrlFromText(text))
+      }
+      setIsPasteAvailable(hasInternal || hasSupportedImage || hasUrl)
     } catch {
       // Permission denied or unavailable clipboard API. Keep internal availability only.
       setIsPasteAvailable(hasInternal)
@@ -2094,12 +2510,25 @@ async function createImagesFromFiles(files, baseX, baseY) {
       setImages((prev) => [...prev, pastedImage])
       setSelectedImageIds([pastedImage.id])
       setSelectedPaletteIds([])
+      setSelectedLinkThumbnailIds([])
       setPasteCount((prev) => prev + 1)
       setMenuState(null)
       commitHistory(prevImages, prevSelected)
       return 'pasted'
     }
     if (pasteFromInternalClipboard()) return 'pasted'
+    if (window.isSecureContext && navigator.clipboard?.readText) {
+      try {
+        const text = await navigator.clipboard.readText()
+        const pastedUrl = parseFirstUrlFromText(text)
+        if (pastedUrl) {
+          const created = await createLinkThumbnailFromUrl(pastedUrl)
+          if (created) return 'pasted'
+        }
+      } catch {
+        // Ignore clipboard text failure and fall through.
+      }
+    }
     if (clipboardResult.status === 'denied') return 'denied'
     if (clipboardResult.status === 'unsupported') return 'unsupported'
     return 'empty'
@@ -2235,14 +2664,16 @@ async function createImagesFromFiles(files, baseX, baseY) {
         const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
         let dx = pointer.x - dragState.startPointerX
         let dy = pointer.y - dragState.startPointerY
+        let smartSnapGuides = { vertical: null, horizontal: null }
         if (isSnappingEnabled || isImageSnappingEnabled) {
           const primaryStart = dragState.initialPositions[dragState.primaryId]
           if (primaryStart) {
             let smartSnap = null
             if (isImageSnappingEnabled) {
-              smartSnap = getSmartSnapResult(images, dragState, dx, dy)
+              smartSnap = getSmartSnapResult(images, palettesRef.current, linkThumbnailsRef.current, dragState, dx, dy)
               dx = smartSnap.dx
               dy = smartSnap.dy
+              smartSnapGuides = smartSnap.guides
               setSmartGuides(smartSnap.guides)
             } else {
               setSmartGuides((prev) => (prev.vertical || prev.horizontal ? { vertical: null, horizontal: null } : prev))
@@ -2267,50 +2698,84 @@ async function createImagesFromFiles(files, baseX, baseY) {
         let persistentGroupAssignments = new Map()
         if (isMagneticSnapEnabled && !dragState.altOverride) {
           const snapshotImages = imagesRef.current
-          const draggedSet = new Set(movedIds)
+          const snapshotPalettes = palettesRef.current
+          const snapshotLinks = linkThumbnailsRef.current
+          const snapshotEntities = [
+            ...snapshotImages.map((image) => ({ ...image, type: 'image', width: getImageSize(image).width, height: getImageSize(image).height })),
+            ...snapshotPalettes.map((palette) => {
+              const size = getPaletteSize(palette)
+              return { ...palette, type: 'palette', width: size.width, height: size.height }
+            }),
+            ...snapshotLinks.map((item) => {
+              const size = getLinkThumbnailSize(item)
+              return { ...item, type: 'link-thumbnail', width: size.width, height: size.height }
+            }),
+          ]
+          const draggedSet = new Set([
+            ...movedIds,
+            ...Object.keys(dragState.initialPalettePositions ?? {}),
+            ...Object.keys(dragState.initialLinkThumbnailPositions ?? {}),
+          ])
           const groupSet = new Set(draggedSet)
           const blockedLinkIds = new Set(dragState.blockedLinkIds ?? [])
           const blockedGroupIds = new Set(dragState.blockedGroupIds ?? [])
-          const imagesById = new Map(snapshotImages.map((image) => [image.id, image]))
+          const entitiesById = new Map(snapshotEntities.map((entity) => [entity.id, entity]))
           const primaryStart = dragState.initialAllPositions[dragState.primaryId]
           if (!primaryStart) return
           const draggedIds = [...draggedSet]
 
-          function getPlannedGroupId(imageId) {
-            if (persistentGroupAssignments.has(imageId)) return persistentGroupAssignments.get(imageId)
-            return imagesById.get(imageId)?.magneticGroupId ?? null
+          function getPlannedGroupId(entityId) {
+            if (persistentGroupAssignments.has(entityId)) return persistentGroupAssignments.get(entityId)
+            return entitiesById.get(entityId)?.magneticGroupId ?? null
           }
 
-          function getMembersForPersistentGroup(imageId) {
-            const seedGroupId = getPlannedGroupId(imageId)
-            if (!seedGroupId) return [imageId]
-            const members = snapshotImages
-              .filter((image) => getPlannedGroupId(image.id) === seedGroupId)
-              .map((image) => image.id)
-            return members.length > 0 ? members : [imageId]
+          function getMembersForPersistentGroup(entityId) {
+            const seedGroupId = getPlannedGroupId(entityId)
+            if (!seedGroupId) return [entityId]
+            const members = snapshotEntities
+              .filter((entity) => getPlannedGroupId(entity.id) === seedGroupId)
+              .map((entity) => entity.id)
+            return members.length > 0 ? members : [entityId]
           }
 
-          function getProjectedBounds(imageId, projectedDx = dx, projectedDy = dy) {
-            const image = imagesById.get(imageId)
-            if (!image) return null
-            const size = getImageSize(image)
-            if (draggedSet.has(imageId)) {
-              const start = dragState.initialAllPositions[imageId]
+          function getProjectedBounds(entityId, projectedDx = dx, projectedDy = dy) {
+            const entity = entitiesById.get(entityId)
+            if (!entity) return null
+            if (draggedSet.has(entityId)) {
+              const start = dragState.initialAllPositions[entityId]
               if (!start) return null
-              return getBoundsFromImage(image, start.x + projectedDx, start.y + projectedDy, size.width, size.height)
+              if (entity.type === 'palette') {
+                return getBoundsFromPalette(entity, start.x + projectedDx, start.y + projectedDy)
+              }
+              if (entity.type === 'link-thumbnail') {
+                return getBoundsFromLinkThumbnail(entity, start.x + projectedDx, start.y + projectedDy)
+              }
+              return getBoundsFromImage(entity, start.x + projectedDx, start.y + projectedDy, entity.width, entity.height)
             }
-            return getBoundsFromImage(image, image.x, image.y, size.width, size.height)
+            if (entity.type === 'palette') return getBoundsFromPalette(entity)
+            if (entity.type === 'link-thumbnail') return getBoundsFromLinkThumbnail(entity)
+            return getBoundsFromImage(entity, entity.x, entity.y, entity.width, entity.height)
           }
 
-          const draggedBounds = getDraggedGroupBounds(snapshotImages, draggedIds, dragState.initialAllPositions, dx, dy)
+          const draggedBounds = getDraggedGroupBounds(
+            snapshotImages,
+            snapshotPalettes,
+            linkThumbnailsRef.current,
+            draggedIds,
+            Object.keys(dragState.initialPalettePositions ?? {}),
+            Object.keys(dragState.initialLinkThumbnailPositions ?? {}),
+            { ...dragState.initialAllPositions, ...(dragState.initialPalettePositions ?? {}), ...(dragState.initialLinkThumbnailPositions ?? {}) },
+            dx,
+            dy,
+          )
           if (draggedBounds) {
             let bestX = null
             let bestY = null
-            for (const image of snapshotImages) {
-              if (draggedSet.has(image.id)) continue
-              const candidateGroupId = getPlannedGroupId(image.id)
-              if (blockedLinkIds.has(image.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
-              const target = getProjectedBounds(image.id, dx, dy)
+            for (const entity of snapshotEntities) {
+              if (draggedSet.has(entity.id)) continue
+              const candidateGroupId = getPlannedGroupId(entity.id)
+              if (blockedLinkIds.has(entity.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
+              const target = getProjectedBounds(entity.id, dx, dy)
               if (!target) continue
 
               const xCandidates = [
@@ -2333,15 +2798,15 @@ async function createImagesFromFiles(files, baseX, baseY) {
                 if (!bestY || distance < bestY.distance) bestY = { ...candidate, distance }
               }
             }
-            if (bestX) dx += bestX.delta
-            if (bestY) dy += bestY.delta
+            if (bestX && !smartSnapGuides.vertical) dx += bestX.delta
+            if (bestY && !smartSnapGuides.horizontal) dy += bestY.delta
           }
 
-          for (const image of snapshotImages) {
-            if (groupSet.has(image.id)) continue
-            const candidateGroupId = getPlannedGroupId(image.id)
-            if (blockedLinkIds.has(image.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
-            const attachCandidateIds = getMembersForPersistentGroup(image.id)
+          for (const entity of snapshotEntities) {
+            if (groupSet.has(entity.id)) continue
+            const candidateGroupId = getPlannedGroupId(entity.id)
+            if (blockedLinkIds.has(entity.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
+            const attachCandidateIds = getMembersForPersistentGroup(entity.id)
             let shouldAttach = false
             for (const candidateId of attachCandidateIds) {
               const candidateBounds = getProjectedBounds(candidateId, dx, dy)
@@ -2387,6 +2852,25 @@ async function createImagesFromFiles(files, baseX, baseY) {
             return { ...nextImage, x: start.x + dx, y: start.y + dy }
           }),
         )
+        setPalettes((prev) =>
+          prev.map((palette) => {
+            const nextGroupId = persistentGroupAssignments.get(palette.id)
+            if (!nextGroupId || palette.magneticGroupId === nextGroupId) return palette
+            return { ...palette, magneticGroupId: nextGroupId }
+          }),
+        )
+        setLinkThumbnails((prev) =>
+          prev.map((item) => {
+            let nextItem = item
+            const nextGroupId = persistentGroupAssignments.get(item.id)
+            if (nextGroupId && nextItem.magneticGroupId !== nextGroupId) {
+              nextItem = { ...nextItem, magneticGroupId: nextGroupId }
+            }
+            const start = dragState.initialLinkThumbnailPositions?.[item.id]
+            if (!start) return nextItem
+            return { ...nextItem, x: start.x + dx, y: start.y + dy }
+          }),
+        )
         if (dragState.initialPalettePositions && Object.keys(dragState.initialPalettePositions).length > 0) {
           setPalettes((prev) =>
             prev.map((palette) => {
@@ -2401,8 +2885,99 @@ async function createImagesFromFiles(files, baseX, baseY) {
 
       if (paletteDragState) {
         const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
-        const dx = pointer.x - paletteDragState.startPointerX
-        const dy = pointer.y - paletteDragState.startPointerY
+        let dx = pointer.x - paletteDragState.startPointerX
+        let dy = pointer.y - paletteDragState.startPointerY
+        if (isMagneticSnapEnabled && !paletteDragState.altOverride) {
+          const draggedPaletteSet = new Set(Object.keys(paletteDragState.initialPalettePositions))
+          const draggedImageSet = new Set(Object.keys(paletteDragState.initialImagePositions))
+          const draggedLinkSet = new Set(Object.keys(paletteDragState.initialLinkThumbnailPositions ?? {}))
+          let minX = Infinity
+          let minY = Infinity
+          let maxX = -Infinity
+          let maxY = -Infinity
+          for (const palette of palettesRef.current) {
+            const start = paletteDragState.initialPalettePositions[palette.id]
+            if (!start) continue
+            const bounds = getBoundsFromPalette(palette, start.x + dx, start.y + dy)
+            minX = Math.min(minX, bounds.left)
+            minY = Math.min(minY, bounds.top)
+            maxX = Math.max(maxX, bounds.right)
+            maxY = Math.max(maxY, bounds.bottom)
+          }
+          for (const image of imagesRef.current) {
+            const start = paletteDragState.initialImagePositions[image.id]
+            if (!start) continue
+            const size = getImageSize(image)
+            const bounds = getBoundsFromImage(image, start.x + dx, start.y + dy, size.width, size.height)
+            minX = Math.min(minX, bounds.left)
+            minY = Math.min(minY, bounds.top)
+            maxX = Math.max(maxX, bounds.right)
+            maxY = Math.max(maxY, bounds.bottom)
+          }
+          for (const item of linkThumbnailsRef.current) {
+            const start = paletteDragState.initialLinkThumbnailPositions?.[item.id]
+            if (!start) continue
+            const bounds = getBoundsFromLinkThumbnail(item, start.x + dx, start.y + dy)
+            minX = Math.min(minX, bounds.left)
+            minY = Math.min(minY, bounds.top)
+            maxX = Math.max(maxX, bounds.right)
+            maxY = Math.max(maxY, bounds.bottom)
+          }
+          if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+            let bestX = null
+            let bestY = null
+            for (const image of imagesRef.current) {
+              if (draggedImageSet.has(image.id)) continue
+              const target = getBoundsFromImage(image, image.x, image.y, getImageSize(image).width, getImageSize(image).height)
+              const xCandidates = [{ delta: target.left - maxX }, { delta: target.right - minX }]
+              for (const candidate of xCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestX || distance < bestX.distance) bestX = { ...candidate, distance }
+              }
+              const yCandidates = [{ delta: target.top - maxY }, { delta: target.bottom - minY }]
+              for (const candidate of yCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestY || distance < bestY.distance) bestY = { ...candidate, distance }
+              }
+            }
+            for (const palette of palettesRef.current) {
+              if (draggedPaletteSet.has(palette.id)) continue
+              const target = getBoundsFromPalette(palette)
+              const xCandidates = [{ delta: target.left - maxX }, { delta: target.right - minX }]
+              for (const candidate of xCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestX || distance < bestX.distance) bestX = { ...candidate, distance }
+              }
+              const yCandidates = [{ delta: target.top - maxY }, { delta: target.bottom - minY }]
+              for (const candidate of yCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestY || distance < bestY.distance) bestY = { ...candidate, distance }
+              }
+            }
+            for (const item of linkThumbnailsRef.current) {
+              if (draggedLinkSet.has(item.id)) continue
+              const target = getBoundsFromLinkThumbnail(item)
+              const xCandidates = [{ delta: target.left - maxX }, { delta: target.right - minX }]
+              for (const candidate of xCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestX || distance < bestX.distance) bestX = { ...candidate, distance }
+              }
+              const yCandidates = [{ delta: target.top - maxY }, { delta: target.bottom - minY }]
+              for (const candidate of yCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestY || distance < bestY.distance) bestY = { ...candidate, distance }
+              }
+            }
+            if (bestX) dx += bestX.delta
+            if (bestY) dy += bestY.delta
+          }
+        }
         setPalettes((prev) =>
           prev.map((palette) => {
             const start = paletteDragState.initialPalettePositions[palette.id]
@@ -2410,6 +2985,15 @@ async function createImagesFromFiles(files, baseX, baseY) {
             return { ...palette, x: start.x + dx, y: start.y + dy }
           }),
         )
+        if (paletteDragState.initialLinkThumbnailPositions && Object.keys(paletteDragState.initialLinkThumbnailPositions).length > 0) {
+          setLinkThumbnails((prev) =>
+            prev.map((item) => {
+              const start = paletteDragState.initialLinkThumbnailPositions[item.id]
+              if (!start) return item
+              return { ...item, x: start.x + dx, y: start.y + dy }
+            }),
+          )
+        }
         if (Object.keys(paletteDragState.initialImagePositions).length > 0) {
           setImages((prev) =>
             prev.map((image) => {
@@ -2499,14 +3083,28 @@ async function createImagesFromFiles(files, baseX, baseY) {
             Math.abs(marqueeState.currentClientX - marqueeState.startClientX) < MARQUEE_CLICK_THRESHOLD &&
             Math.abs(marqueeState.currentClientY - marqueeState.startClientY) < MARQUEE_CLICK_THRESHOLD
           if (isClick) {
-            if (!marqueeState.appendToSelection) setSelectedImageIds([])
+            if (!marqueeState.appendToSelection) {
+              setSelectedImageIds([])
+              setSelectedPaletteIds([])
+              setSelectedLinkThumbnailIds([])
+            }
           } else {
             const topLeft = toCanvasPoint(left, top, rect, offsetX, offsetY, scale)
             const bottomRight = toCanvasPoint(right, bottom, rect, offsetX, offsetY, scale)
             const selectionRect = { left: topLeft.x, right: bottomRight.x, top: topLeft.y, bottom: bottomRight.y }
             const intersected = images.filter((image) => intersects(selectionRect, image)).map((image) => image.id)
-            setSelectedImageIds((prev) =>
-              marqueeState.appendToSelection ? Array.from(new Set([...prev, ...intersected])) : intersected,
+            const intersectedPalettes = palettesRef.current
+              .filter((palette) => intersects(selectionRect, { ...palette, ...getPaletteSize(palette) }))
+              .map((palette) => palette.id)
+            const intersectedLinks = linkThumbnailsRef.current
+              .filter((item) => intersects(selectionRect, { ...item, ...getLinkThumbnailSize(item) }))
+              .map((item) => item.id)
+            setSelectedImageIds((prev) => (marqueeState.appendToSelection ? Array.from(new Set([...prev, ...intersected])) : intersected))
+            setSelectedPaletteIds((prev) =>
+              marqueeState.appendToSelection ? Array.from(new Set([...prev, ...intersectedPalettes])) : intersectedPalettes,
+            )
+            setSelectedLinkThumbnailIds((prev) =>
+              marqueeState.appendToSelection ? Array.from(new Set([...prev, ...intersectedLinks])) : intersectedLinks,
             )
           }
         }
@@ -2563,6 +3161,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       }
       if (paletteDragState) {
         const draggedPaletteIds = new Set(paletteDragState.draggedPaletteIds ?? [])
+        const draggedLinkIds = new Set(paletteDragState.draggedLinkThumbnailIds ?? [])
         if (paletteDragState.altOverride || !isMagneticSnapEnabled) {
           setPalettes((prev) => {
             let changed = false
@@ -2575,11 +3174,24 @@ async function createImagesFromFiles(files, baseX, baseY) {
             if (changed) didPaletteGroupUpdate = true
             return changed ? next : prev
           })
+          setLinkThumbnails((prev) => {
+            let changed = false
+            const next = prev.map((item) => {
+              if (!draggedLinkIds.has(item.id)) return item
+              if (!item.magneticGroupId) return item
+              changed = true
+              return { ...item, magneticGroupId: null }
+            })
+            if (changed) didPaletteGroupUpdate = true
+            return changed ? next : prev
+          })
         } else {
           const imagesSnapshot = imagesRef.current
           const palettesSnapshot = palettesRef.current
+          const linksSnapshot = linkThumbnailsRef.current
           const imageUpdates = new Map()
           const paletteUpdates = new Map()
+          const linkUpdates = new Map()
           for (const palette of palettesSnapshot) {
             if (!draggedPaletteIds.has(palette.id)) continue
             const paletteBounds = getBoundsFromPalette(palette)
@@ -2588,14 +3200,74 @@ async function createImagesFromFiles(files, baseX, baseY) {
               const imageBounds = getBoundsFromImage(image)
               const distance = getMinEdgeDistance(paletteBounds, imageBounds)
               if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
-              if (!best || distance < best.distance) best = { imageId: image.id, distance }
+              if (!best || distance < best.distance) best = { type: 'image', id: image.id, distance }
+            }
+            for (const candidatePalette of palettesSnapshot) {
+              if (draggedPaletteIds.has(candidatePalette.id)) continue
+              const candidateBounds = getBoundsFromPalette(candidatePalette)
+              const distance = getMinEdgeDistance(paletteBounds, candidateBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { type: 'palette', id: candidatePalette.id, distance }
+            }
+            for (const linkItem of linksSnapshot) {
+              if (draggedLinkIds.has(linkItem.id)) continue
+              const candidateBounds = getBoundsFromLinkThumbnail(linkItem)
+              const distance = getMinEdgeDistance(paletteBounds, candidateBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { type: 'link-thumbnail', id: linkItem.id, distance }
             }
             if (!best) continue
-            const targetImage = imagesSnapshot.find((image) => image.id === best.imageId)
-            if (!targetImage) continue
-            const groupId = targetImage.magneticGroupId || palette.magneticGroupId || crypto.randomUUID()
-            imageUpdates.set(targetImage.id, groupId)
+            const targetImage = best.type === 'image' ? imagesSnapshot.find((image) => image.id === best.id) : null
+            const targetPalette = best.type === 'palette' ? palettesSnapshot.find((entry) => entry.id === best.id) : null
+            const targetLink = best.type === 'link-thumbnail' ? linksSnapshot.find((entry) => entry.id === best.id) : null
+            const groupId =
+              targetImage?.magneticGroupId ||
+              targetPalette?.magneticGroupId ||
+              targetLink?.magneticGroupId ||
+              palette.magneticGroupId ||
+              crypto.randomUUID()
+            if (targetImage) imageUpdates.set(targetImage.id, groupId)
+            if (targetPalette) paletteUpdates.set(targetPalette.id, groupId)
+            if (targetLink) linkUpdates.set(targetLink.id, groupId)
             paletteUpdates.set(palette.id, groupId)
+          }
+          for (const linkItem of linksSnapshot) {
+            if (!draggedLinkIds.has(linkItem.id)) continue
+            const linkBounds = getBoundsFromLinkThumbnail(linkItem)
+            let best = null
+            for (const image of imagesSnapshot) {
+              const imageBounds = getBoundsFromImage(image)
+              const distance = getMinEdgeDistance(linkBounds, imageBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { type: 'image', id: image.id, distance }
+            }
+            for (const palette of palettesSnapshot) {
+              const paletteBounds = getBoundsFromPalette(palette)
+              const distance = getMinEdgeDistance(linkBounds, paletteBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { type: 'palette', id: palette.id, distance }
+            }
+            for (const otherLink of linksSnapshot) {
+              if (otherLink.id === linkItem.id || draggedLinkIds.has(otherLink.id)) continue
+              const otherBounds = getBoundsFromLinkThumbnail(otherLink)
+              const distance = getMinEdgeDistance(linkBounds, otherBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { type: 'link-thumbnail', id: otherLink.id, distance }
+            }
+            if (!best) continue
+            const targetImage = best.type === 'image' ? imagesSnapshot.find((image) => image.id === best.id) : null
+            const targetPalette = best.type === 'palette' ? palettesSnapshot.find((entry) => entry.id === best.id) : null
+            const targetLink = best.type === 'link-thumbnail' ? linksSnapshot.find((entry) => entry.id === best.id) : null
+            const groupId =
+              targetImage?.magneticGroupId ||
+              targetPalette?.magneticGroupId ||
+              targetLink?.magneticGroupId ||
+              linkItem.magneticGroupId ||
+              crypto.randomUUID()
+            if (targetImage) imageUpdates.set(targetImage.id, groupId)
+            if (targetPalette) paletteUpdates.set(targetPalette.id, groupId)
+            if (targetLink) linkUpdates.set(targetLink.id, groupId)
+            linkUpdates.set(linkItem.id, groupId)
           }
           if (imageUpdates.size > 0) {
             setImages((prev) => {
@@ -2623,11 +3295,30 @@ async function createImagesFromFiles(files, baseX, baseY) {
               return changed ? next : prev
             })
           }
+          if (linkUpdates.size > 0) {
+            setLinkThumbnails((prev) => {
+              let changed = false
+              const next = prev.map((item) => {
+                const groupId = linkUpdates.get(item.id)
+                if (!groupId || item.magneticGroupId === groupId) return item
+                changed = true
+                return { ...item, magneticGroupId: groupId }
+              })
+              if (changed) didPaletteGroupUpdate = true
+              return changed ? next : prev
+            })
+          }
         }
       }
 
       if (didAltDetachUpdate || hasSnapshotChanged(dragState?.historySnapshot)) {
-        commitHistory(dragState.historySnapshot.images, dragState.historySnapshot.selectedImageIds)
+        commitHistory(
+          dragState.historySnapshot.images,
+          dragState.historySnapshot.selectedImageIds,
+          dragState.historySnapshot.comments,
+          dragState.historySnapshot.palettes,
+          dragState.historySnapshot.linkThumbnails,
+        )
       }
       if (paletteDragState && (didPaletteGroupUpdate || hasSnapshotChanged(paletteDragState.historySnapshot))) {
         commitHistory(
@@ -2635,16 +3326,24 @@ async function createImagesFromFiles(files, baseX, baseY) {
           paletteDragState.historySnapshot.selectedImageIds,
           paletteDragState.historySnapshot.comments,
           paletteDragState.historySnapshot.palettes,
+          paletteDragState.historySnapshot.linkThumbnails,
         )
       }
       if (hasSnapshotChanged(resizeState?.historySnapshot)) {
-        commitHistory(resizeState.historySnapshot.images, resizeState.historySnapshot.selectedImageIds)
+        commitHistory(
+          resizeState.historySnapshot.images,
+          resizeState.historySnapshot.selectedImageIds,
+          resizeState.historySnapshot.comments,
+          resizeState.historySnapshot.palettes,
+        )
       }
       if (commentDragState && hasSnapshotChanged(commentDragState.historySnapshot)) {
         commitHistory(
           commentDragState.historySnapshot.images,
           commentDragState.historySnapshot.selectedImageIds,
           commentDragState.historySnapshot.comments,
+          commentDragState.historySnapshot.palettes,
+          commentDragState.historySnapshot.linkThumbnails,
         )
       }
       setDragState(null)
@@ -2760,6 +3459,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     setMenuState(null)
     if (!canTransform) {
       setSelectedPaletteIds([])
+      setSelectedLinkThumbnailIds([])
       if (!selectedImageIds.includes(image.id)) setSelectedImageIds([image.id])
       showLockBlockedFeedback()
       return
@@ -2792,7 +3492,6 @@ async function createImagesFromFiles(files, baseX, baseY) {
       return
     }
     if (event.shiftKey) {
-      setSelectedPaletteIds([])
       setSelectedImageIds((prev) => (prev.includes(image.id) ? prev.filter((id) => id !== image.id) : [...prev, image.id]))
       return
     }
@@ -2802,15 +3501,29 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const draggedIds = isAltOverride ? baseDraggedIds : expandIdsWithPersistentGroups(baseDraggedIds, images)
     if (!isAlreadySelected) setSelectedImageIds([image.id])
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
     const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
     const initialPositions = {}
     const initialAllPositions = {}
     const initialPalettePositions = {}
+    const initialLinkThumbnailPositions = {}
+    const selectedPaletteSet = new Set(selectedPaletteIds)
     for (const currentImage of images) {
       initialAllPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
       if (draggedIds.includes(currentImage.id)) initialPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
+    }
+    for (const paletteEntry of palettes) {
+      if (selectedPaletteSet.has(paletteEntry.id)) {
+        initialPalettePositions[paletteEntry.id] = { x: paletteEntry.x, y: paletteEntry.y }
+      }
+    }
+    const selectedLinkSet = new Set(selectedLinkThumbnailIds)
+    for (const linkItem of linkThumbnails) {
+      if (selectedLinkSet.has(linkItem.id)) {
+        initialLinkThumbnailPositions[linkItem.id] = { x: linkItem.x, y: linkItem.y }
+      }
     }
     if (!isAltOverride) {
       const draggedGroupIds = new Set(
@@ -2822,6 +3535,10 @@ async function createImagesFromFiles(files, baseX, baseY) {
         if (!paletteEntry.magneticGroupId || !draggedGroupIds.has(paletteEntry.magneticGroupId)) continue
         initialPalettePositions[paletteEntry.id] = { x: paletteEntry.x, y: paletteEntry.y }
       }
+      for (const linkItem of linkThumbnails) {
+        if (!linkItem.magneticGroupId || !draggedGroupIds.has(linkItem.magneticGroupId)) continue
+        initialLinkThumbnailPositions[linkItem.id] = { x: linkItem.x, y: linkItem.y }
+      }
     }
     setDragState({
       primaryId: image.id,
@@ -2832,6 +3549,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       initialPositions,
       initialAllPositions,
       initialPalettePositions,
+      initialLinkThumbnailPositions,
       altOverride: isAltOverride,
       blockedLinkIds: [],
       blockedGroupIds: [],
@@ -2845,7 +3563,13 @@ async function createImagesFromFiles(files, baseX, baseY) {
           })
           .filter(Boolean),
       ),
-      historySnapshot: { images: imagesRef.current, selectedImageIds: selectedIdsRef.current },
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        palettes: palettesRef.current,
+        linkThumbnails: linkThumbnailsRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
     })
     maybeShowAltDragHint(event, image)
   }
@@ -2856,8 +3580,16 @@ async function createImagesFromFiles(files, baseX, baseY) {
     event.preventDefault()
     event.stopPropagation()
     setMenuState(null)
-    setSelectedImageIds([])
-    setSelectedPaletteIds([palette.id])
+    if (event.shiftKey) {
+      setSelectedPaletteIds((prev) => (prev.includes(palette.id) ? prev.filter((id) => id !== palette.id) : [...prev, palette.id]))
+      return
+    }
+    const isAlreadySelected = selectedPaletteIds.includes(palette.id)
+    if (!isAlreadySelected) {
+      setSelectedImageIds([])
+      setSelectedPaletteIds([palette.id])
+      setSelectedLinkThumbnailIds([])
+    }
     if (!canTransform) {
       showLockBlockedFeedback()
       return
@@ -2867,9 +3599,10 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
     const isAltOverride = event.altKey
     const linkedGroupId = !isAltOverride ? palette.magneticGroupId : null
+    const basePaletteIds = isAlreadySelected ? selectedPaletteIds : [palette.id]
     const draggedPaletteIds = linkedGroupId
-      ? palettes.filter((entry) => entry.magneticGroupId === linkedGroupId).map((entry) => entry.id)
-      : [palette.id]
+      ? Array.from(new Set([...basePaletteIds, ...palettes.filter((entry) => entry.magneticGroupId === linkedGroupId).map((entry) => entry.id)]))
+      : basePaletteIds
     const initialPalettePositions = {}
     for (const currentPalette of palettes) {
       if (draggedPaletteIds.includes(currentPalette.id)) {
@@ -2877,11 +3610,23 @@ async function createImagesFromFiles(files, baseX, baseY) {
       }
     }
     const initialImagePositions = {}
-    if (linkedGroupId) {
-      for (const image of images) {
-        if (image.magneticGroupId !== linkedGroupId) continue
+    const selectedImageSet = new Set(selectedImageIds)
+    for (const image of images) {
+      if (selectedImageSet.has(image.id)) {
         initialImagePositions[image.id] = { x: image.x, y: image.y }
+        continue
       }
+      if (!linkedGroupId || image.magneticGroupId !== linkedGroupId) continue
+      initialImagePositions[image.id] = { x: image.x, y: image.y }
+    }
+    const initialLinkThumbnailPositions = {}
+    for (const item of linkThumbnails) {
+      if (selectedLinkThumbnailIds.includes(item.id)) {
+        initialLinkThumbnailPositions[item.id] = { x: item.x, y: item.y }
+        continue
+      }
+      if (!linkedGroupId || item.magneticGroupId !== linkedGroupId) continue
+      initialLinkThumbnailPositions[item.id] = { x: item.x, y: item.y }
     }
     setPaletteDragState({
       paletteId: palette.id,
@@ -2890,11 +3635,13 @@ async function createImagesFromFiles(files, baseX, baseY) {
       startPointerX: pointer.x,
       startPointerY: pointer.y,
       initialPalettePositions,
+      initialLinkThumbnailPositions,
       initialImagePositions,
       historySnapshot: {
         images: imagesRef.current,
         comments: commentsRef.current,
         palettes: palettesRef.current,
+        linkThumbnails: linkThumbnailsRef.current,
         selectedImageIds: selectedIdsRef.current,
       },
     })
@@ -2905,10 +3652,104 @@ async function createImagesFromFiles(files, baseX, baseY) {
     event.stopPropagation()
     setSelectedImageIds([])
     setSelectedPaletteIds([palette.id])
+    setSelectedLinkThumbnailIds([])
     setMenuState({ type: 'palette', x: event.clientX, y: event.clientY })
   }
 
-  function handleResizeHandleMouseDown(event, image, handle) {
+  function openLinkThumbnail(item) {
+    if (!item?.href) return
+    window.open(item.href, '_blank', 'noopener,noreferrer')
+  }
+
+  function handleLinkThumbnailMouseDown(event, item) {
+    if (event.button !== 0) return
+    if (cropMode || isCommentMode) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenuState(null)
+    if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+      openLinkThumbnail(item)
+      return
+    }
+    if (event.shiftKey) {
+      setSelectedLinkThumbnailIds((prev) => (prev.includes(item.id) ? prev.filter((id) => id !== item.id) : [...prev, item.id]))
+      return
+    }
+    const isAlreadySelected = selectedLinkThumbnailIds.includes(item.id)
+    if (!isAlreadySelected) {
+      setSelectedImageIds([])
+      setSelectedPaletteIds([])
+      setSelectedLinkThumbnailIds([item.id])
+    }
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return
+    }
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
+    const isAltOverride = event.altKey
+    const linkedGroupId = !isAltOverride ? item.magneticGroupId : null
+    const baseIds = isAlreadySelected ? selectedLinkThumbnailIds : [item.id]
+    const draggedLinkThumbnailIds = linkedGroupId
+      ? Array.from(new Set([...baseIds, ...linkThumbnails.filter((entry) => entry.magneticGroupId === linkedGroupId).map((entry) => entry.id)]))
+      : baseIds
+    const initialLinkThumbnailPositions = {}
+    for (const currentItem of linkThumbnails) {
+      if (draggedLinkThumbnailIds.includes(currentItem.id)) {
+        initialLinkThumbnailPositions[currentItem.id] = { x: currentItem.x, y: currentItem.y }
+      }
+    }
+    const initialImagePositions = {}
+    const selectedImageSet = new Set(selectedImageIds)
+    for (const image of images) {
+      if (selectedImageSet.has(image.id)) {
+        initialImagePositions[image.id] = { x: image.x, y: image.y }
+        continue
+      }
+      if (!linkedGroupId || image.magneticGroupId !== linkedGroupId) continue
+      initialImagePositions[image.id] = { x: image.x, y: image.y }
+    }
+    const initialPalettePositions = {}
+    for (const palette of palettes) {
+      if (selectedPaletteIds.includes(palette.id)) {
+        initialPalettePositions[palette.id] = { x: palette.x, y: palette.y }
+        continue
+      }
+      if (!linkedGroupId || palette.magneticGroupId !== linkedGroupId) continue
+      initialPalettePositions[palette.id] = { x: palette.x, y: palette.y }
+    }
+    setPaletteDragState({
+      paletteId: null,
+      draggedPaletteIds: Object.keys(initialPalettePositions),
+      draggedLinkThumbnailIds,
+      altOverride: isAltOverride,
+      startPointerX: pointer.x,
+      startPointerY: pointer.y,
+      initialPalettePositions,
+      initialLinkThumbnailPositions,
+      initialImagePositions,
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        palettes: palettesRef.current,
+        linkThumbnails: linkThumbnailsRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
+    })
+  }
+
+  function handleLinkThumbnailContextMenu(event, item) {
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedImageIds([])
+    setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([item.id])
+    setMenuState({ type: 'link-thumbnail', x: event.clientX, y: event.clientY })
+  }
+
+  function handleResizeHandleMouseDown(event, entity, handle) {
+    if (!isTransformableEntity(entity)) return
     if (!canTransform) {
       showLockBlockedFeedback()
       return
@@ -2918,19 +3759,25 @@ async function createImagesFromFiles(files, baseX, baseY) {
     event.stopPropagation()
     setMenuState(null)
     setSelectedPaletteIds([])
-    setSelectedImageIds([image.id])
+    setSelectedImageIds([entity.id])
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
     const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
-    const renderedBounds = getRenderedImageBounds(image, imageNaturalSizes[image.id])
+    const renderedBounds = getRenderedImageBounds(entity, imageNaturalSizes[entity.id])
     setResizeState({
-      id: image.id,
+      id: entity.id,
+      type: 'image',
       handle,
       startPointerX: pointer.x,
       startPointerY: pointer.y,
       startRect: renderedBounds,
       aspectRatio: Math.max(0.0001, renderedBounds.width / Math.max(renderedBounds.height, 0.0001)),
-      historySnapshot: { images: imagesRef.current, selectedImageIds: selectedIdsRef.current },
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        palettes: palettesRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
     })
   }
 
@@ -2962,6 +3809,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     setMenuState(null)
     if (event.button === 0) {
       setSelectedPaletteIds([])
+      setSelectedLinkThumbnailIds([])
     }
     if (activeCommentRef) {
       closeCommentEditorFromOutside()
@@ -3073,7 +3921,61 @@ async function createImagesFromFiles(files, baseX, baseY) {
       setMenuState({ type: 'palette', x: event.clientX, y: event.clientY })
       return
     }
+    if (selectedLinkThumbnailIds.length > 0) {
+      setMenuState({ type: 'link-thumbnail', x: event.clientX, y: event.clientY })
+      return
+    }
     setMenuState({ type: 'canvas', x: event.clientX, y: event.clientY })
+  }
+
+  function getSelectedCanvasEntities() {
+    const imageSet = new Set(selectedImageIds)
+    const paletteSet = new Set(selectedPaletteIds)
+    const linkSet = new Set(selectedLinkThumbnailIds)
+    const selectedImages = images
+      .filter((image) => imageSet.has(image.id))
+      .map((image) => {
+        const size = getImageSize(image)
+        return { ...image, type: 'image', isTransformable: true, width: size.width, height: size.height }
+      })
+    const selectedPalettes = palettes
+      .filter((palette) => paletteSet.has(palette.id))
+      .map((palette) => {
+        const size = getPaletteSize(palette)
+        return { ...palette, type: 'palette', isTransformable: false, width: size.width, height: size.height }
+      })
+    const selectedLinks = linkThumbnails
+      .filter((item) => linkSet.has(item.id))
+      .map((item) => {
+        const size = getLinkThumbnailSize(item)
+        return { ...item, type: 'link-thumbnail', isTransformable: false, width: size.width, height: size.height }
+      })
+    return [...selectedImages, ...selectedPalettes, ...selectedLinks]
+  }
+
+  function applyEntityGeometryUpdates(byId) {
+    if (!(byId instanceof Map) || byId.size === 0) return
+    setImages((prev) =>
+      prev.map((image) => {
+        const next = byId.get(image.id)
+        if (!next) return image
+        return { ...image, x: next.x, y: next.y, width: next.width, height: next.height }
+      }),
+    )
+    setPalettes((prev) =>
+      prev.map((palette) => {
+        const next = byId.get(palette.id)
+        if (!next) return palette
+        return { ...palette, x: next.x, y: next.y }
+      }),
+    )
+    setLinkThumbnails((prev) =>
+      prev.map((item) => {
+        const next = byId.get(item.id)
+        if (!next) return item
+        return { ...item, x: next.x, y: next.y }
+      }),
+    )
   }
 
   function handleNormalizeHeight() {
@@ -3081,25 +3983,29 @@ async function createImagesFromFiles(files, baseX, baseY) {
       showLockBlockedFeedback()
       return
     }
-    if (selectedImageIds.length === 0) return
+    const selected = getSelectedCanvasEntities().filter(isTransformableEntity)
+    if (selected.length === 0) return
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
-    const selected = images.filter((image) => selectedImageIds.includes(image.id))
     const ordered = [...selected].sort((a, b) => a.y - b.y || a.x - b.x)
-    const avgH = ordered.reduce((total, image) => total + getImageSize(image).height, 0) / ordered.length
-    const minX = Math.min(...ordered.map((image) => image.x))
-    const minY = Math.min(...ordered.map((image) => image.y))
-    const maxX = Math.max(...ordered.map((image) => image.x + getImageSize(image).width))
+    const avgH = ordered.reduce((total, entity) => total + entity.height, 0) / ordered.length
+    const minX = Math.min(...ordered.map((entity) => entity.x))
+    const minY = Math.min(...ordered.map((entity) => entity.y))
+    const maxX = Math.max(...ordered.map((entity) => entity.x + entity.width))
     const targetWidth = Math.max(maxX - minX, 800)
-    const resized = ordered.map((image) => {
-      const size = getImageSize(image)
-      return { ...image, width: (size.width / size.height) * avgH, height: avgH }
+    const resized = ordered.map((entity) => {
+      const ratio = entity.width / Math.max(entity.height, 0.0001)
+      return { ...entity, width: Math.max(MIN_IMAGE_SIZE, ratio * avgH), height: Math.max(MIN_IMAGE_SIZE, avgH) }
     })
-    const laidOut = packRows(resized, minX, minY, targetWidth, IMAGE_SPACING)
-    const byId = new Map(laidOut.map((image) => [image.id, image]))
-    setImages((prev) => prev.map((image) => byId.get(image.id) ?? image))
+    const laidOut = packRows(resized, minX, minY, targetWidth, IMAGE_SPACING).map((entity) => ({
+      ...entity,
+      width: Math.max(MIN_IMAGE_SIZE, entity.width),
+      height: Math.max(MIN_IMAGE_SIZE, entity.height),
+    }))
+    const byId = new Map(laidOut.map((entity) => [entity.id, entity]))
+    applyEntityGeometryUpdates(byId)
     setMenuState(null)
-    commitHistory(prevImages, prevSelected)
+    commitHistory(prevImages, prevSelected, commentsRef.current, palettesRef.current)
   }
 
   function handleNormalizeWidth() {
@@ -3107,25 +4013,29 @@ async function createImagesFromFiles(files, baseX, baseY) {
       showLockBlockedFeedback()
       return
     }
-    if (selectedImageIds.length === 0) return
+    const selected = getSelectedCanvasEntities().filter(isTransformableEntity)
+    if (selected.length === 0) return
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
-    const selected = images.filter((image) => selectedImageIds.includes(image.id))
     const ordered = [...selected].sort((a, b) => a.y - b.y || a.x - b.x)
-    const avgW = ordered.reduce((total, image) => total + getImageSize(image).width, 0) / ordered.length
-    const minX = Math.min(...ordered.map((image) => image.x))
-    const minY = Math.min(...ordered.map((image) => image.y))
-    const maxX = Math.max(...ordered.map((image) => image.x + getImageSize(image).width))
+    const avgW = ordered.reduce((total, entity) => total + entity.width, 0) / ordered.length
+    const minX = Math.min(...ordered.map((entity) => entity.x))
+    const minY = Math.min(...ordered.map((entity) => entity.y))
+    const maxX = Math.max(...ordered.map((entity) => entity.x + entity.width))
     const targetWidth = Math.max(maxX - minX, 800)
-    const resized = ordered.map((image) => {
-      const size = getImageSize(image)
-      return { ...image, width: avgW, height: (size.height / size.width) * avgW }
+    const resized = ordered.map((entity) => {
+      const ratio = entity.height / Math.max(entity.width, 0.0001)
+      return { ...entity, width: Math.max(MIN_IMAGE_SIZE, avgW), height: Math.max(MIN_IMAGE_SIZE, ratio * avgW) }
     })
-    const laidOut = packRows(resized, minX, minY, targetWidth, IMAGE_SPACING)
-    const byId = new Map(laidOut.map((image) => [image.id, image]))
-    setImages((prev) => prev.map((image) => byId.get(image.id) ?? image))
+    const laidOut = packRows(resized, minX, minY, targetWidth, IMAGE_SPACING).map((entity) => ({
+      ...entity,
+      width: Math.max(MIN_IMAGE_SIZE, entity.width),
+      height: Math.max(MIN_IMAGE_SIZE, entity.height),
+    }))
+    const byId = new Map(laidOut.map((entity) => [entity.id, entity]))
+    applyEntityGeometryUpdates(byId)
     setMenuState(null)
-    commitHistory(prevImages, prevSelected)
+    commitHistory(prevImages, prevSelected, commentsRef.current, palettesRef.current)
   }
 
   function handleOptimizeLayout() {
@@ -3133,30 +4043,23 @@ async function createImagesFromFiles(files, baseX, baseY) {
       showLockBlockedFeedback()
       return
     }
-    if (selectedImageIds.length === 0) return
+    const selected = getSelectedCanvasEntities()
+    if (selected.length === 0) return
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
-    const selected = images.filter((image) => selectedImageIds.includes(image.id))
     const ordered = [...selected].sort((a, b) => a.y - b.y || a.x - b.x)
-    const totalArea = ordered.reduce((total, image) => {
-      const size = getImageSize(image)
-      return total + size.width * size.height
-    }, 0)
+    const totalArea = ordered.reduce((total, entity) => total + entity.width * entity.height, 0)
     const targetRowWidth = Math.max(900, Math.sqrt(totalArea) * 1.7)
-    const items = ordered.map((image) => {
-      const size = getImageSize(image)
-      return { ...image, width: size.width, height: size.height }
-    })
-    const packed = packRows(items, 0, 0, targetRowWidth, IMAGE_SPACING)
-    const originalMinX = Math.min(...ordered.map((image) => image.x))
-    const originalMinY = Math.min(...ordered.map((image) => image.y))
-    const minX = Math.min(...packed.map((image) => image.x))
-    const minY = Math.min(...packed.map((image) => image.y))
-    const optimized = packed.map((image) => ({ ...image, x: originalMinX + (image.x - minX), y: originalMinY + (image.y - minY) }))
-    const byId = new Map(optimized.map((image) => [image.id, image]))
-    setImages((prev) => prev.map((image) => byId.get(image.id) ?? image))
+    const packed = packRows(ordered, 0, 0, targetRowWidth, IMAGE_SPACING)
+    const originalMinX = Math.min(...ordered.map((entity) => entity.x))
+    const originalMinY = Math.min(...ordered.map((entity) => entity.y))
+    const minX = Math.min(...packed.map((entity) => entity.x))
+    const minY = Math.min(...packed.map((entity) => entity.y))
+    const optimized = packed.map((entity) => ({ ...entity, x: originalMinX + (entity.x - minX), y: originalMinY + (entity.y - minY) }))
+    const byId = new Map(optimized.map((entity) => [entity.id, entity]))
+    applyEntityGeometryUpdates(byId)
     setMenuState(null)
-    commitHistory(prevImages, prevSelected)
+    commitHistory(prevImages, prevSelected, commentsRef.current, palettesRef.current)
   }
 
   function handleAlignSelected(mode) {
@@ -3164,35 +4067,34 @@ async function createImagesFromFiles(files, baseX, baseY) {
       showLockBlockedFeedback()
       return
     }
-    if (selectedImageIds.length < 2) return
+    const selected = getSelectedCanvasEntities()
+    if (selected.length < 2) return
     const prevImages = imagesRef.current
     const prevSelected = selectedIdsRef.current
-    const selectedSet = new Set(selectedImageIds)
-    const selected = images.filter((image) => selectedSet.has(image.id))
-    if (selected.length < 2) return
 
-    const left = Math.min(...selected.map((image) => image.x))
-    const top = Math.min(...selected.map((image) => image.y))
-    const right = Math.max(...selected.map((image) => image.x + getImageSize(image).width))
-    const bottom = Math.max(...selected.map((image) => image.y + getImageSize(image).height))
+    const selectedSet = new Set(selected.map((entity) => entity.id))
+    const left = Math.min(...selected.map((entity) => entity.x))
+    const top = Math.min(...selected.map((entity) => entity.y))
+    const right = Math.max(...selected.map((entity) => entity.x + entity.width))
+    const bottom = Math.max(...selected.map((entity) => entity.y + entity.height))
     const centerX = (left + right) / 2
     const centerY = (top + bottom) / 2
 
-    setImages((prev) =>
-      prev.map((image) => {
-        if (!selectedSet.has(image.id)) return image
-        const size = getImageSize(image)
-        if (mode === 'left') return { ...image, x: left }
-        if (mode === 'right') return { ...image, x: right - size.width }
-        if (mode === 'top') return { ...image, y: top }
-        if (mode === 'bottom') return { ...image, y: bottom - size.height }
-        if (mode === 'hcenter') return { ...image, x: centerX - size.width / 2 }
-        if (mode === 'vcenter') return { ...image, y: centerY - size.height / 2 }
-        return image
-      }),
-    )
+    const byId = new Map()
+    for (const entity of selected) {
+      let x = entity.x
+      let y = entity.y
+      if (mode === 'left') x = left
+      if (mode === 'right') x = right - entity.width
+      if (mode === 'top') y = top
+      if (mode === 'bottom') y = bottom - entity.height
+      if (mode === 'hcenter') x = centerX - entity.width / 2
+      if (mode === 'vcenter') y = centerY - entity.height / 2
+      byId.set(entity.id, { x, y, width: entity.width, height: entity.height })
+    }
+    applyEntityGeometryUpdates(byId)
     setMenuState(null)
-    commitHistory(prevImages, prevSelected)
+    commitHistory(prevImages, prevSelected, commentsRef.current, palettesRef.current)
   }
 
   function getPaletteExtractionSourceImages() {
@@ -3288,8 +4190,10 @@ async function createImagesFromFiles(files, baseX, baseY) {
     setImages([])
     setComments([])
     setPalettes([])
+    setLinkThumbnails([])
     setSelectedImageIds([])
     setSelectedPaletteIds([])
+    setSelectedLinkThumbnailIds([])
     setMenuState(null)
     navigate(`/board/${generateBoardId()}`, { replace: true })
   }
@@ -3385,15 +4289,25 @@ async function createImagesFromFiles(files, baseX, baseY) {
     if (!rect) return
     const nextScale = 1
     setScale(nextScale)
-    if (images.length === 0) {
+    if (images.length === 0 && palettes.length === 0 && linkThumbnails.length === 0) {
       setOffsetX(rect.width / 2)
       setOffsetY(rect.height / 2)
       return
     }
-    const minX = Math.min(...images.map((image) => image.x))
-    const minY = Math.min(...images.map((image) => image.y))
-    const maxX = Math.max(...images.map((image) => image.x + getImageSize(image).width))
-    const maxY = Math.max(...images.map((image) => image.y + getImageSize(image).height))
+    const imageRects = images.map((image) => ({ x: image.x, y: image.y, width: getImageSize(image).width, height: getImageSize(image).height }))
+    const paletteRects = palettes.map((palette) => {
+      const size = getPaletteSize(palette)
+      return { x: palette.x, y: palette.y, width: size.width, height: size.height }
+    })
+    const linkRects = linkThumbnails.map((item) => {
+      const size = getLinkThumbnailSize(item)
+      return { x: item.x, y: item.y, width: size.width, height: size.height }
+    })
+    const allRects = [...imageRects, ...paletteRects, ...linkRects]
+    const minX = Math.min(...allRects.map((item) => item.x))
+    const minY = Math.min(...allRects.map((item) => item.y))
+    const maxX = Math.max(...allRects.map((item) => item.x + item.width))
+    const maxY = Math.max(...allRects.map((item) => item.y + item.height))
     const contentCenterX = (minX + maxX) / 2
     const contentCenterY = (minY + maxY) / 2
     setOffsetX(rect.width / 2 - contentCenterX * nextScale)
@@ -3483,6 +4397,8 @@ async function createImagesFromFiles(files, baseX, baseY) {
       historySnapshot: {
         images: imagesRef.current,
         comments: commentsRef.current,
+        palettes: palettesRef.current,
+        linkThumbnails: linkThumbnailsRef.current,
         selectedImageIds: selectedIdsRef.current,
       },
     })
@@ -3560,14 +4476,32 @@ async function createImagesFromFiles(files, baseX, baseY) {
   }
 
   const selectedImage = selectedImageIds.length === 1 ? images.find((image) => image.id === selectedImageIds[0]) ?? null : null
-  const selectedRenderedBounds = selectedImage ? getRenderedImageBounds(selectedImage, imageNaturalSizes[selectedImage.id]) : null
-  const selectedOutlines = images
-    .filter((image) => selectedImageIds.includes(image.id))
+  const selectedPalette = selectedPaletteIds.length === 1 ? palettes.find((palette) => palette.id === selectedPaletteIds[0]) ?? null : null
+  const selectedLinkThumbnail =
+    selectedLinkThumbnailIds.length === 1
+      ? linkThumbnails.find((item) => item.id === selectedLinkThumbnailIds[0]) ?? null
+      : null
+  const singleSelectedEntity =
+    selectedImageIds.length + selectedPaletteIds.length + selectedLinkThumbnailIds.length === 1
+      ? (selectedImage ?? selectedPalette ?? selectedLinkThumbnail)
+      : null
+  const singleSelectedTransformableEntity = singleSelectedEntity && isTransformableEntity(singleSelectedEntity) ? singleSelectedEntity : null
+  const selectedEntityCount = selectedImageIds.length + selectedPaletteIds.length + selectedLinkThumbnailIds.length
+  const selectedRenderedBounds = singleSelectedEntity
+    ? (singleSelectedEntity.type === 'palette'
+      ? (() => {
+          const b = getBoundsFromPalette(singleSelectedEntity)
+          return { x: b.left, y: b.top, width: b.width, height: b.height }
+        })()
+      : getRenderedImageBounds(singleSelectedEntity, imageNaturalSizes[singleSelectedEntity.id]))
+    : null
+  const selectedImageOutlines = images
+    .filter((image) => selectedImageIds.includes(image.id) && isTransformableEntity(image))
     .map((image) => ({
       id: image.id,
       bounds: getRenderedImageBounds(image, imageNaturalSizes[image.id]),
     }))
-  const resizeHandleDefs = selectedImage && selectedRenderedBounds
+  const resizeHandleDefs = singleSelectedTransformableEntity && selectedRenderedBounds
     ? [
         { handle: 'nw', x: selectedRenderedBounds.x, y: selectedRenderedBounds.y },
         { handle: 'n', x: selectedRenderedBounds.x + selectedRenderedBounds.width / 2, y: selectedRenderedBounds.y },
@@ -3579,9 +4513,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
         { handle: 'w', x: selectedRenderedBounds.x, y: selectedRenderedBounds.y + selectedRenderedBounds.height / 2 },
       ]
     : []
-  const canResetSelectedImageCropTransform = selectedImage ? canResetCropOrTransform(selectedImage) : false
-  const selectedPalette = selectedPaletteIds.length === 1 ? palettes.find((palette) => palette.id === selectedPaletteIds[0]) ?? null : null
-  const canDeleteSelection = !isCanvasLocked && (selectedImageIds.length > 0 || selectedPaletteIds.length > 0)
+  const canResetSelectedImageCropTransform =
+    selectedImage && selectedPaletteIds.length === 0 && selectedLinkThumbnailIds.length === 0 ? canResetCropOrTransform(selectedImage) : false
+  const canDeleteSelection = !isCanvasLocked && (selectedImageIds.length > 0 || selectedPaletteIds.length > 0 || selectedLinkThumbnailIds.length > 0)
   const canCopySelectedPalette = !isCanvasLocked && Boolean(selectedPalette)
   const cropModeImage = cropMode ? images.find((image) => image.id === cropMode.id) ?? null : null
   const cropModeImageBounds = cropModeImage ? getImageBounds(cropModeImage) : null
@@ -3604,7 +4538,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
   const paletteSourceImages = getPaletteExtractionSourceImages()
   const canExtractPalette = !isCanvasLocked && !isExtractingPalette && paletteSourceImages.length > 0
   const hasImages = images.length > 0
-  const hasCanvasItems = images.length > 0 || palettes.length > 0
+  const hasCanvasItems = images.length > 0 || palettes.length > 0 || linkThumbnails.length > 0
   const shouldShowWorldOrigin = scale < 1.2 || !hasCanvasItems
   const commentPins = comments.map((comment) => {
     const world = getCommentWorldPosition(comment, images)
@@ -3696,7 +4630,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
                   left: `${palette.x}px`,
                   top: `${palette.y}px`,
                   width: `${size.width}px`,
-                  minHeight: `${size.height}px`,
+                  height: `${size.height}px`,
                   gridTemplateColumns: `repeat(${size.columns}, ${size.swatchSize}px)`,
                 }}
                 onMouseDown={(event) => handlePaletteMouseDown(event, palette)}
@@ -3715,6 +4649,43 @@ async function createImagesFromFiles(files, baseX, baseY) {
                   />
                 ))}
               </div>
+            )
+          })}
+          {linkThumbnails.map((item) => {
+            const size = getLinkThumbnailSize(item)
+            const isSelected = selectedLinkThumbnailIds.includes(item.id)
+            return (
+              <article
+                key={item.id}
+                className={`canvas-link-thumbnail ${isSelected ? 'is-selected' : ''}`.trim()}
+                style={{
+                  left: `${item.x}px`,
+                  top: `${item.y}px`,
+                  width: `${size.width}px`,
+                  height: `${size.height}px`,
+                }}
+                onMouseDown={(event) => handleLinkThumbnailMouseDown(event, item)}
+                onDoubleClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  openLinkThumbnail(item)
+                }}
+                onContextMenu={(event) => handleLinkThumbnailContextMenu(event, item)}
+                title={item.href}
+              >
+                <span className="canvas-link-thumbnail__arrow" aria-hidden="true">
+                  <ExternalLink size={13} strokeWidth={ICON_STROKE_WIDTH} />
+                </span>
+                <div className="canvas-link-thumbnail__media">
+                  {item.imageUrl
+                    ? <img src={item.imageUrl} alt="" className="canvas-link-thumbnail__image" draggable={false} />
+                    : <div className="canvas-link-thumbnail__skeleton" />}
+                </div>
+                <div className="canvas-link-thumbnail__body">
+                  <div className="canvas-link-thumbnail__title">{item.title || item.domain}</div>
+                  <div className="canvas-link-thumbnail__domain">{item.domain}</div>
+                </div>
+              </article>
             )
           })}
           {images.map((image) => {
@@ -3755,7 +4726,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
               </div>
             )
           })}
-          {selectedOutlines.map((outline) => (
+          {selectedImageOutlines.map((outline) => (
             <div
               key={`outline-${outline.id}`}
               className="canvas-selection-outline"
@@ -3779,13 +4750,13 @@ async function createImagesFromFiles(files, baseX, baseY) {
               aria-label={pin.text ? 'Comment with text' : 'Comment draft'}
             />
           ))}
-          {selectedImage ? resizeHandleDefs.map((handleDef) => (
+          {singleSelectedTransformableEntity ? resizeHandleDefs.map((handleDef) => (
             <button
               key={handleDef.handle}
               type="button"
               className={`canvas-resize-handle is-${handleDef.handle}`.trim()}
               style={{ left: `${handleDef.x}px`, top: `${handleDef.y}px` }}
-              onMouseDown={(event) => handleResizeHandleMouseDown(event, selectedImage, handleDef.handle)}
+              onMouseDown={(event) => handleResizeHandleMouseDown(event, singleSelectedTransformableEntity, handleDef.handle)}
             />
           )) : null}
           {cropMode ? (
@@ -3934,9 +4905,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
             <>
               <button
                 type="button"
-                className={`canvas-menu-item ${selectedImageIds.length === 1 ? '' : 'is-disabled'}`.trim()}
+                className={`canvas-menu-item ${selectedImageIds.length === 1 && selectedPaletteIds.length === 0 ? '' : 'is-disabled'}`.trim()}
                 onClick={() => enterCropMode(selectedImageIds[0])}
-                disabled={selectedImageIds.length !== 1}
+                disabled={selectedImageIds.length !== 1 || selectedPaletteIds.length > 0}
               >
                 <MenuIcon>
                   <Crop size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
@@ -3960,7 +4931,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
                 </MenuIcon>
                 <span className="canvas-menu-item__label">{isExtractingPalette ? 'Extracting color palette...' : 'Extract Color Palette'}</span>
               </button>
-              {selectedImageIds.length === 1 && canResetSelectedImageCropTransform ? (
+              {selectedImageIds.length === 1 && selectedPaletteIds.length === 0 && canResetSelectedImageCropTransform ? (
                 <button
                   type="button"
                   className={`canvas-menu-item ${canResetSelectedImageCropTransform ? '' : 'is-disabled'}`.trim()}
@@ -3993,7 +4964,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
                 <span className="canvas-menu-item__label">Optimize layout</span>
                 <span className="canvas-menu-item__badge">PRO</span>
               </button>
-              {selectedImageIds.length >= 2 ? (
+              {selectedEntityCount >= 2 ? (
                 <>
                   <div className="canvas-context-menu__divider" />
                   <div className="canvas-menu-submenu">
@@ -4048,6 +5019,35 @@ async function createImagesFromFiles(files, baseX, baseY) {
             </>
           ) : menuState.type === 'palette' ? (
             <>
+              <button type="button" className="canvas-menu-item" onClick={handleOptimizeLayout}>
+                <MenuIcon>
+                  <LayoutGrid size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                </MenuIcon>
+                <span className="canvas-menu-item__label">Optimize layout</span>
+              </button>
+              {selectedEntityCount >= 2 ? (
+                <>
+                  <div className="canvas-context-menu__divider" />
+                  <div className="canvas-menu-submenu">
+                    <button type="button" className="canvas-menu-item canvas-menu-submenu__trigger">
+                      <MenuIcon>
+                        <AlignLeft size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                      </MenuIcon>
+                      <span className="canvas-menu-item__label">Align</span>
+                      <span className="canvas-menu-submenu__chevron" aria-hidden="true"><ChevronRight size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+                    </button>
+                    <div className="canvas-menu-submenu__panel">
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('left')}><MenuIcon><AlignLeft size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Left</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('right')}><MenuIcon><AlignRight size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Right</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('top')}><MenuIcon><AlignTop size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Top</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('bottom')}><MenuIcon><AlignBottom size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Bottom</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('hcenter')}><MenuIcon><AlignCenterHorizontal size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Horizontal Center</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('vcenter')}><MenuIcon><AlignCenterVertical size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Vertical Center</span></button>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+              <div className="canvas-context-menu__divider" />
               <div className="canvas-menu-submenu">
                 <button type="button" className="canvas-menu-item canvas-menu-submenu__trigger">
                   <MenuIcon>
@@ -4116,6 +5116,49 @@ async function createImagesFromFiles(files, baseX, baseY) {
                   </button>
                 </div>
               </div>
+            </>
+          ) : menuState.type === 'link-thumbnail' ? (
+            <>
+              <button type="button" className="canvas-menu-item" onClick={handleOptimizeLayout}>
+                <MenuIcon>
+                  <LayoutGrid size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                </MenuIcon>
+                <span className="canvas-menu-item__label">Optimize layout</span>
+              </button>
+              {selectedEntityCount >= 2 ? (
+                <>
+                  <div className="canvas-context-menu__divider" />
+                  <div className="canvas-menu-submenu">
+                    <button type="button" className="canvas-menu-item canvas-menu-submenu__trigger">
+                      <MenuIcon>
+                        <AlignLeft size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                      </MenuIcon>
+                      <span className="canvas-menu-item__label">Align</span>
+                      <span className="canvas-menu-submenu__chevron" aria-hidden="true"><ChevronRight size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+                    </button>
+                    <div className="canvas-menu-submenu__panel">
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('left')}><MenuIcon><AlignLeft size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Left</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('right')}><MenuIcon><AlignRight size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Right</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('top')}><MenuIcon><AlignTop size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Top</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('bottom')}><MenuIcon><AlignBottom size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Bottom</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('hcenter')}><MenuIcon><AlignCenterHorizontal size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Horizontal Center</span></button>
+                      <button type="button" className="canvas-menu-item" onClick={() => handleAlignSelected('vcenter')}><MenuIcon><AlignCenterVertical size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon><span className="canvas-menu-item__label">Align Vertical Center</span></button>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+              <div className="canvas-context-menu__divider" />
+              <button
+                type="button"
+                className={`canvas-menu-item is-danger ${canDeleteSelection ? '' : 'is-disabled'}`.trim()}
+                onClick={deleteSelectedCanvasItems}
+                disabled={!canDeleteSelection}
+              >
+                <MenuIcon>
+                  <Trash2 size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                </MenuIcon>
+                <span className="canvas-menu-item__label">Delete Link Card</span>
+              </button>
             </>
           ) : (
             <>
