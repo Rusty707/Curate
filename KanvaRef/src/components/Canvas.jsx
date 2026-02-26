@@ -40,8 +40,7 @@ const GRID_SIZE = 24
 const PASTE_OFFSET_STEP = 20
 const HISTORY_LIMIT = 20
 const MIN_CROP_RECT_SIZE = 16
-const MAGNETIC_SNAP_RADIUS = 72
-const MAGNETIC_DETACH_RADIUS = 96
+const MAGNETIC_SNAP_EDGE_THRESHOLD = 48
 const MENU_ICON_SIZE = 18
 const ICON_STROKE_WIDTH = 2.3
 const SMART_SNAP_THRESHOLD = 5
@@ -99,6 +98,7 @@ function stripImageForStorage(image) {
     y: image.y,
     width: image.width,
     height: image.height,
+    magneticGroupId: typeof image.magneticGroupId === 'string' && image.magneticGroupId ? image.magneticGroupId : null,
   }
 }
 
@@ -147,6 +147,7 @@ function makeImageItem(src, x, y, width, height) {
     scale: 1,
     rotation: 0,
     comments: [],
+    magneticGroupId: null,
     x,
     y,
     width,
@@ -169,6 +170,7 @@ function normalizeImageItem(image) {
     scale: typeof image.scale === 'number' ? image.scale : 1,
     rotation: typeof image.rotation === 'number' ? image.rotation : 0,
     comments: Array.isArray(image.comments) ? image.comments.map(normalizeImageComment).filter(Boolean) : [],
+    magneticGroupId: typeof image.magneticGroupId === 'string' && image.magneticGroupId ? image.magneticGroupId : null,
   }
 }
 
@@ -509,10 +511,36 @@ function getBoundsFromImage(image, x = image.x, y = image.y, width = image.width
   }
 }
 
-function getEdgeGap(a, b) {
-  const dx = Math.max(0, Math.max(a.left - b.right, b.left - a.right))
-  const dy = Math.max(0, Math.max(a.top - b.bottom, b.top - a.bottom))
-  return Math.hypot(dx, dy)
+function getMinEdgeDistance(a, b) {
+  const leftGap = Math.abs(a.left - b.right)
+  const rightGap = Math.abs(a.right - b.left)
+  const topGap = Math.abs(a.top - b.bottom)
+  const bottomGap = Math.abs(a.bottom - b.top)
+  const horizontalGap =
+    a.right < b.left ? rightGap
+      : b.right < a.left ? leftGap
+        : 0
+  const verticalGap =
+    a.bottom < b.top ? bottomGap
+      : b.bottom < a.top ? topGap
+        : 0
+  return Math.hypot(horizontalGap, verticalGap)
+}
+
+function getPersistentGroupMemberIds(images, groupId) {
+  if (!groupId) return []
+  return images.filter((image) => image.magneticGroupId === groupId).map((image) => image.id)
+}
+
+function expandIdsWithPersistentGroups(ids, images) {
+  const expanded = new Set(ids)
+  for (const id of ids) {
+    const image = images.find((entry) => entry.id === id)
+    if (!image?.magneticGroupId) continue
+    const members = getPersistentGroupMemberIds(images, image.magneticGroupId)
+    for (const memberId of members) expanded.add(memberId)
+  }
+  return [...expanded]
 }
 
 function getSmartSnapResult(images, dragState, dx, dy, threshold = SMART_SNAP_THRESHOLD) {
@@ -1864,100 +1892,111 @@ async function createImagesFromFiles(files, baseX, baseY) {
         }
         const movedIds = new Set(dragState.draggedIds)
         let linkedIds = []
-        let anchorOffsets = dragState.anchorOffsets ?? {}
-        if (isMagneticSnapEnabled) {
-          const imagesById = new Map(imagesRef.current.map((image) => [image.id, image]))
-          const draggedSet = new Set(dragState.draggedIds)
-          const groupSet = new Set(dragState.magneticGroupIds ?? dragState.draggedIds)
-          const nextAnchorOffsets = { ...anchorOffsets }
+        let persistentGroupAssignments = new Map()
+        if (isMagneticSnapEnabled && !dragState.altOverride) {
+          const snapshotImages = imagesRef.current
+          const draggedSet = new Set(movedIds)
+          const groupSet = new Set(draggedSet)
+          const blockedLinkIds = new Set(dragState.blockedLinkIds ?? [])
+          const blockedGroupIds = new Set(dragState.blockedGroupIds ?? [])
+          const imagesById = new Map(snapshotImages.map((image) => [image.id, image]))
           const primaryStart = dragState.initialAllPositions[dragState.primaryId]
-          const primaryNow = { x: primaryStart.x + dx, y: primaryStart.y + dy }
+          if (!primaryStart) return
+          const draggedIds = [...draggedSet]
 
-          for (const imageId of draggedSet) {
-            const start = dragState.initialAllPositions[imageId]
-            if (!start) continue
-            nextAnchorOffsets[imageId] = { x: start.x - primaryStart.x, y: start.y - primaryStart.y }
-            groupSet.add(imageId)
+          function getPlannedGroupId(imageId) {
+            if (persistentGroupAssignments.has(imageId)) return persistentGroupAssignments.get(imageId)
+            return imagesById.get(imageId)?.magneticGroupId ?? null
           }
 
-          function getProjectedPosition(imageId) {
-            const anchor = nextAnchorOffsets[imageId]
-            if (anchor) {
-              return { x: primaryNow.x + anchor.x, y: primaryNow.y + anchor.y }
-            }
-            const current = imagesById.get(imageId)
-            return current ? { x: current.x, y: current.y } : null
+          function getMembersForPersistentGroup(imageId) {
+            const seedGroupId = getPlannedGroupId(imageId)
+            if (!seedGroupId) return [imageId]
+            const members = snapshotImages
+              .filter((image) => getPlannedGroupId(image.id) === seedGroupId)
+              .map((image) => image.id)
+            return members.length > 0 ? members : [imageId]
           }
 
-          function getProjectedBounds(imageId) {
+          function getProjectedBounds(imageId, projectedDx = dx, projectedDy = dy) {
             const image = imagesById.get(imageId)
-            const projected = getProjectedPosition(imageId)
-            if (!image || !projected) return null
+            if (!image) return null
             const size = getImageSize(image)
-            return getBoundsFromImage(image, projected.x, projected.y, size.width, size.height)
+            if (draggedSet.has(imageId)) {
+              const start = dragState.initialAllPositions[imageId]
+              if (!start) return null
+              return getBoundsFromImage(image, start.x + projectedDx, start.y + projectedDy, size.width, size.height)
+            }
+            return getBoundsFromImage(image, image.x, image.y, size.width, size.height)
           }
 
-          let added = true
-          while (added) {
-            added = false
-            for (const image of imagesRef.current) {
-              if (groupSet.has(image.id)) continue
-              const candidateBounds = getProjectedBounds(image.id)
+          const draggedBounds = getDraggedGroupBounds(snapshotImages, draggedIds, dragState.initialAllPositions, dx, dy)
+          if (draggedBounds) {
+            let bestX = null
+            let bestY = null
+            for (const image of snapshotImages) {
+              if (draggedSet.has(image.id)) continue
+              const candidateGroupId = getPlannedGroupId(image.id)
+              if (blockedLinkIds.has(image.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
+              const target = getProjectedBounds(image.id, dx, dy)
+              if (!target) continue
+
+              const xCandidates = [
+                { delta: target.left - draggedBounds.maxX },
+                { delta: target.right - draggedBounds.minX },
+              ]
+              for (const candidate of xCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestX || distance < bestX.distance) bestX = { ...candidate, distance }
+              }
+
+              const yCandidates = [
+                { delta: target.top - draggedBounds.maxY },
+                { delta: target.bottom - draggedBounds.minY },
+              ]
+              for (const candidate of yCandidates) {
+                const distance = Math.abs(candidate.delta)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!bestY || distance < bestY.distance) bestY = { ...candidate, distance }
+              }
+            }
+            if (bestX) dx += bestX.delta
+            if (bestY) dy += bestY.delta
+          }
+
+          for (const image of snapshotImages) {
+            if (groupSet.has(image.id)) continue
+            const candidateGroupId = getPlannedGroupId(image.id)
+            if (blockedLinkIds.has(image.id) || (candidateGroupId && blockedGroupIds.has(candidateGroupId))) continue
+            const attachCandidateIds = getMembersForPersistentGroup(image.id)
+            let shouldAttach = false
+            for (const candidateId of attachCandidateIds) {
+              const candidateBounds = getProjectedBounds(candidateId, dx, dy)
               if (!candidateBounds) continue
-              let shouldAttach = false
-              for (const memberId of groupSet) {
-                const memberBounds = getProjectedBounds(memberId)
+              for (const memberId of draggedSet) {
+                const memberBounds = getProjectedBounds(memberId, dx, dy)
                 if (!memberBounds) continue
-                if (getEdgeGap(candidateBounds, memberBounds) <= MAGNETIC_SNAP_RADIUS) {
+                if (getMinEdgeDistance(candidateBounds, memberBounds) <= MAGNETIC_SNAP_EDGE_THRESHOLD) {
                   shouldAttach = true
                   break
                 }
               }
-              if (!shouldAttach) continue
-              const current = imagesById.get(image.id)
-              if (!current) continue
-              nextAnchorOffsets[image.id] = { x: current.x - primaryNow.x, y: current.y - primaryNow.y }
-              groupSet.add(image.id)
-              added = true
+              if (shouldAttach) break
+            }
+            if (!shouldAttach) continue
+
+            const existingGroupId =
+              [...draggedSet].map((id) => getPlannedGroupId(id)).find((id) => typeof id === 'string' && id) ??
+              attachCandidateIds.map((id) => getPlannedGroupId(id)).find((id) => typeof id === 'string' && id) ??
+              crypto.randomUUID()
+            for (const id of [...groupSet, ...attachCandidateIds]) {
+              persistentGroupAssignments.set(id, existingGroupId)
+              groupSet.add(id)
             }
           }
 
-          for (const imageId of [...groupSet]) {
-            if (draggedSet.has(imageId)) continue
-            const candidateBounds = getProjectedBounds(imageId)
-            if (!candidateBounds) {
-              groupSet.delete(imageId)
-              delete nextAnchorOffsets[imageId]
-              continue
-            }
-            let keepLinked = false
-            for (const memberId of groupSet) {
-              if (memberId === imageId) continue
-              const memberBounds = getProjectedBounds(memberId)
-              if (!memberBounds) continue
-              if (getEdgeGap(candidateBounds, memberBounds) <= MAGNETIC_DETACH_RADIUS) {
-                keepLinked = true
-                break
-              }
-            }
-            if (!keepLinked) {
-              groupSet.delete(imageId)
-              delete nextAnchorOffsets[imageId]
-            }
-          }
-
-          movedIds.clear()
-          for (const id of groupSet) movedIds.add(id)
           linkedIds = [...groupSet].filter((id) => !draggedSet.has(id))
-          anchorOffsets = nextAnchorOffsets
-          if (
-            JSON.stringify(dragState.magneticGroupIds ?? []) !== JSON.stringify([...groupSet]) ||
-            JSON.stringify(dragState.anchorOffsets ?? {}) !== JSON.stringify(nextAnchorOffsets)
-          ) {
-            setDragState((prev) => (prev
-              ? { ...prev, magneticGroupIds: [...groupSet], anchorOffsets: nextAnchorOffsets }
-              : prev))
-          }
         }
         setMagneticSnapLinkedIds((prev) => {
           if (prev.length === linkedIds.length && prev.every((id, index) => id === linkedIds[index])) return prev
@@ -1965,21 +2004,15 @@ async function createImagesFromFiles(files, baseX, baseY) {
         })
         setImages((prev) =>
           prev.map((image) => {
-            if (!movedIds.has(image.id)) return image
-            if (isMagneticSnapEnabled && anchorOffsets[image.id]) {
-              const primaryStart = dragState.initialAllPositions[dragState.primaryId]
-              if (!primaryStart) return image
-              const nextPrimaryX = primaryStart.x + dx
-              const nextPrimaryY = primaryStart.y + dy
-              return {
-                ...image,
-                x: nextPrimaryX + anchorOffsets[image.id].x,
-                y: nextPrimaryY + anchorOffsets[image.id].y,
-              }
+            let nextImage = image
+            const nextGroupId = persistentGroupAssignments.get(image.id)
+            if (nextGroupId && nextImage.magneticGroupId !== nextGroupId) {
+              nextImage = { ...nextImage, magneticGroupId: nextGroupId }
             }
+            if (!movedIds.has(image.id)) return nextImage
             const start = dragState.initialAllPositions[image.id]
-            if (!start) return image
-            return { ...image, x: start.x + dx, y: start.y + dy }
+            if (!start) return nextImage
+            return { ...nextImage, x: start.x + dx, y: start.y + dy }
           }),
         )
         return
@@ -2074,7 +2107,57 @@ async function createImagesFromFiles(files, baseX, baseY) {
           }
         }
       }
-      if (hasSnapshotChanged(dragState?.historySnapshot)) {
+      let didAltDetachUpdate = false
+      if (dragState?.altOverride) {
+        const draggedSet = new Set(dragState.draggedIds)
+        setImages((prev) => {
+          const byId = new Map(prev.map((image) => [image.id, image]))
+          const groupUpdates = new Map()
+          if (!isMagneticSnapEnabled) {
+            for (const imageId of draggedSet) groupUpdates.set(imageId, null)
+          } else {
+            for (const imageId of draggedSet) {
+              const source = byId.get(imageId)
+              if (!source) continue
+              const sourceSize = getImageSize(source)
+              const sourceBounds = getBoundsFromImage(source, source.x, source.y, sourceSize.width, sourceSize.height)
+              let best = null
+              for (const target of prev) {
+                if (draggedSet.has(target.id)) continue
+                const targetSize = getImageSize(target)
+                const targetBounds = getBoundsFromImage(target, target.x, target.y, targetSize.width, targetSize.height)
+                const distance = getMinEdgeDistance(sourceBounds, targetBounds)
+                if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+                if (!best || distance < best.distance) best = { targetId: target.id, distance }
+              }
+              if (!best) {
+                groupUpdates.set(imageId, null)
+                continue
+              }
+              const targetImage = byId.get(best.targetId)
+              if (!targetImage) {
+                groupUpdates.set(imageId, null)
+                continue
+              }
+              const targetGroupId = targetImage.magneticGroupId || crypto.randomUUID()
+              groupUpdates.set(best.targetId, targetGroupId)
+              groupUpdates.set(imageId, targetGroupId)
+            }
+          }
+          let didChange = false
+          const next = prev.map((image) => {
+            if (!groupUpdates.has(image.id)) return image
+            const nextGroupId = groupUpdates.get(image.id)
+            if ((image.magneticGroupId ?? null) === (nextGroupId ?? null)) return image
+            didChange = true
+            return { ...image, magneticGroupId: nextGroupId }
+          })
+          if (didChange) didAltDetachUpdate = true
+          return didChange ? next : prev
+        })
+      }
+
+      if (didAltDetachUpdate || hasSnapshotChanged(dragState?.historySnapshot)) {
         commitHistory(dragState.historySnapshot.images, dragState.historySnapshot.selectedImageIds)
       }
       if (hasSnapshotChanged(resizeState?.historySnapshot)) {
@@ -2232,7 +2315,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
       return
     }
     const isAlreadySelected = selectedImageIds.includes(image.id)
-    const draggedIds = isAlreadySelected ? selectedImageIds : [image.id]
+    const isAltOverride = event.altKey
+    const baseDraggedIds = isAlreadySelected ? selectedImageIds : [image.id]
+    const draggedIds = isAltOverride ? baseDraggedIds : expandIdsWithPersistentGroups(baseDraggedIds, images)
     if (!isAlreadySelected) setSelectedImageIds([image.id])
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -2251,6 +2336,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
       startPointerY: pointer.y,
       initialPositions,
       initialAllPositions,
+      altOverride: isAltOverride,
+      blockedLinkIds: [],
+      blockedGroupIds: [],
       anchorOffsets: Object.fromEntries(
         draggedIds
           .map((id) => {
