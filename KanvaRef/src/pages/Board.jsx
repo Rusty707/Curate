@@ -3,6 +3,9 @@ import { useParams } from 'react-router-dom'
 import { Canvas } from '../components/Canvas'
 
 const SHARE_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+function getBoardStorageKey(boardId) {
+  return `kanvaref:board:${boardId}`
+}
 
 export function Board() {
   const { id } = useParams()
@@ -22,6 +25,7 @@ export function Board() {
         if (!response.ok) return
         const payload = await response.json()
         if (!payload?.board || typeof payload.board !== 'object') return
+        localStorage.setItem(getBoardStorageKey(id), JSON.stringify(payload.board))
         localStorage.setItem(`curate-board-${id}`, JSON.stringify(payload.board))
         if (!isCancelled) {
           setCanvasVersion((prev) => prev + 1)

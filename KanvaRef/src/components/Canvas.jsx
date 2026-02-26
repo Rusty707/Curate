@@ -54,10 +54,14 @@ const COMMENT_PANEL_FALLBACK_HEIGHT = 152
 const COMMENT_COLORS = ['#F87171', '#FBBF24', '#34D399', '#60A5FA', '#A78BFA', '#F472B6']
 const DEFAULT_COMMENT_COLOR = '#60A5FA'
 const PASTE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
-const STORAGE_KEY = 'canvas-board-v1'
 const MAX_IMAGE_DIMENSION = 4096
 const IMAGE_COMPRESSION_QUALITY = 0.8
 const ALT_DRAG_HINT_STORAGE_KEY = 'seenAltDragHint'
+const PALETTE_MIN_COLORS = 6
+const PALETTE_MAX_COLORS = 12
+const PALETTE_SAMPLE_SIZE = 48
+const PALETTE_MAX_SAMPLES = 12000
+const PALETTE_SIMILARITY_DELTA = 24
 
 function normalizeImageComment(comment) {
   if (!comment || typeof comment !== 'object') return null
@@ -175,6 +179,27 @@ function normalizeImageItem(image) {
   }
 }
 
+function normalizePaletteItem(palette) {
+  if (!palette || typeof palette !== 'object') return null
+  const colors = Array.isArray(palette.colors)
+    ? palette.colors
+      .filter((color) => typeof color === 'string')
+      .map((color) => color.trim().toUpperCase())
+      .filter((color) => /^#[0-9A-F]{6}$/.test(color))
+      .slice(0, PALETTE_MAX_COLORS)
+    : []
+  if (colors.length === 0) return null
+  return {
+    id: typeof palette.id === 'string' && palette.id ? palette.id : crypto.randomUUID(),
+    x: typeof palette.x === 'number' ? palette.x : 0,
+    y: typeof palette.y === 'number' ? palette.y : 0,
+    colors,
+    magneticGroupId: typeof palette.magneticGroupId === 'string' && palette.magneticGroupId ? palette.magneticGroupId : null,
+    createdFromGroupId: typeof palette.createdFromGroupId === 'string' && palette.createdFromGroupId ? palette.createdFromGroupId : null,
+    createdAt: typeof palette.createdAt === 'number' ? palette.createdAt : Date.now(),
+  }
+}
+
 function deriveBoardCommentsFromImages(images) {
   const comments = []
   for (const image of images) {
@@ -214,6 +239,123 @@ function getImageDimensions(src) {
     img.onerror = () => reject(new Error('Failed to load image dimensions'))
     img.src = src
   })
+}
+
+function rgbToHex(r, g, b) {
+  const toHex = (value) => value.toString(16).padStart(2, '0').toUpperCase()
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`
+}
+
+function colorDistance(a, b) {
+  const dr = a[0] - b[0]
+  const dg = a[1] - b[1]
+  const db = a[2] - b[2]
+  return Math.hypot(dr, dg, db)
+}
+
+function dedupeColors(colors, delta = PALETTE_SIMILARITY_DELTA) {
+  const deduped = []
+  for (const color of colors) {
+    if (!deduped.some((existing) => colorDistance(existing, color) <= delta)) deduped.push(color)
+  }
+  return deduped
+}
+
+function runKMeans(samples, k, iterations = 8) {
+  if (!samples.length) return []
+  const centroids = []
+  for (let i = 0; i < k; i += 1) {
+    centroids.push(samples[Math.floor((i / k) * samples.length)] ?? samples[0])
+  }
+  let assignments = new Array(samples.length).fill(0)
+  for (let iter = 0; iter < iterations; iter += 1) {
+    assignments = samples.map((sample) => {
+      let bestIndex = 0
+      let bestDistance = Infinity
+      for (let i = 0; i < centroids.length; i += 1) {
+        const distance = colorDistance(sample, centroids[i])
+        if (distance < bestDistance) {
+          bestDistance = distance
+          bestIndex = i
+        }
+      }
+      return bestIndex
+    })
+
+    const sums = new Array(k).fill(0).map(() => [0, 0, 0, 0])
+    for (let i = 0; i < samples.length; i += 1) {
+      const bucket = sums[assignments[i]]
+      const sample = samples[i]
+      bucket[0] += sample[0]
+      bucket[1] += sample[1]
+      bucket[2] += sample[2]
+      bucket[3] += 1
+    }
+    for (let i = 0; i < k; i += 1) {
+      const bucket = sums[i]
+      if (bucket[3] === 0) continue
+      centroids[i] = [
+        Math.round(bucket[0] / bucket[3]),
+        Math.round(bucket[1] / bucket[3]),
+        Math.round(bucket[2] / bucket[3]),
+      ]
+    }
+  }
+  const weighted = centroids.map((centroid, index) => ({
+    centroid,
+    count: assignments.filter((item) => item === index).length,
+  }))
+  weighted.sort((a, b) => b.count - a.count)
+  return weighted.filter((item) => item.count > 0).map((item) => item.centroid)
+}
+
+async function collectColorSamplesFromImages(images) {
+  const samples = []
+  for (const image of images) {
+    if (!image?.src) continue
+    const element = new Image()
+    element.decoding = 'async'
+    element.src = image.src
+    try {
+      await new Promise((resolve, reject) => {
+        element.onload = resolve
+        element.onerror = reject
+      })
+    } catch {
+      // Ignore unsupported image and continue.
+      continue
+    }
+    const naturalWidth = Math.max(1, element.naturalWidth || 1)
+    const naturalHeight = Math.max(1, element.naturalHeight || 1)
+    const scale = Math.min(1, PALETTE_SAMPLE_SIZE / Math.max(naturalWidth, naturalHeight))
+    const width = Math.max(1, Math.round(naturalWidth * scale))
+    const height = Math.max(1, Math.round(naturalHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) continue
+    ctx.drawImage(element, 0, 0, width, height)
+    const { data } = ctx.getImageData(0, 0, width, height)
+    const stride = data.length > 8000 ? 8 : 4
+    for (let i = 0; i < data.length; i += stride) {
+      const alpha = data[i + 3]
+      if (alpha < 120) continue
+      samples.push([data[i], data[i + 1], data[i + 2]])
+      if (samples.length >= PALETTE_MAX_SAMPLES) return samples
+    }
+    await new Promise((resolve) => window.requestAnimationFrame(resolve))
+  }
+  return samples
+}
+
+async function extractPaletteColorsFromImages(images) {
+  const samples = await collectColorSamplesFromImages(images)
+  if (samples.length === 0) return []
+  const k = clamp(Math.round(samples.length / 1200) + PALETTE_MIN_COLORS, PALETTE_MIN_COLORS, PALETTE_MAX_COLORS)
+  const clustered = runKMeans(samples, k, 8)
+  const deduped = dedupeColors(clustered, PALETTE_SIMILARITY_DELTA)
+  return deduped.slice(0, PALETTE_MAX_COLORS).map((rgb) => rgbToHex(rgb[0], rgb[1], rgb[2]))
 }
 
 async function getImageDimensionsFromFile(file) {
@@ -286,10 +428,26 @@ function serializeImagesForStorage(images) {
   return images.map((image) => stripImageForStorage(image))
 }
 
-function rehydrateBoardState(images, comments) {
+function serializePalettesForStorage(palettes) {
+  return (Array.isArray(palettes) ? palettes : [])
+    .map(normalizePaletteItem)
+    .filter(Boolean)
+    .map((palette) => ({
+      id: palette.id,
+      x: palette.x,
+      y: palette.y,
+      colors: palette.colors,
+      magneticGroupId: palette.magneticGroupId ?? null,
+      createdFromGroupId: palette.createdFromGroupId ?? null,
+      createdAt: palette.createdAt,
+    }))
+}
+
+function rehydrateBoardState(images, comments, palettes) {
   return {
     images: (Array.isArray(images) ? images : []).map(normalizeImageItem).filter(Boolean),
     comments: (Array.isArray(comments) ? comments : []).map(normalizeBoardComment).filter(Boolean),
+    palettes: (Array.isArray(palettes) ? palettes : []).map(normalizePaletteItem).filter(Boolean),
   }
 }
 
@@ -310,7 +468,7 @@ function serializeCommentsForStorage(comments) {
 }
 
 function parseCanvasObjects(objects) {
-  if (!Array.isArray(objects)) return { images: [], comments: [] }
+  if (!Array.isArray(objects)) return { images: [], comments: [], palettes: [] }
   const normalized = objects
     .map((object, index) => ({
       id: typeof object?.id === 'string' ? object.id : crypto.randomUUID(),
@@ -372,17 +530,18 @@ function parseCanvasObjects(objects) {
   return {
     images: images.filter(Boolean),
     comments: comments.filter(Boolean),
+    palettes: [],
   }
 }
 
 function parseBoardState(raw) {
-  if (!raw) return { images: [], comments: [] }
+  if (!raw) return { images: [], comments: [], palettes: [] }
   try {
     const parsed = JSON.parse(raw)
     if (Array.isArray(parsed)) {
       const images = parsed.map(normalizeImageItem)
       const comments = deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
-      return rehydrateBoardState(images, comments)
+      return rehydrateBoardState(images, comments, [])
     }
     if (parsed && typeof parsed === 'object') {
       if (Array.isArray(parsed.objects) && parsed.objects.length > 0) {
@@ -391,20 +550,23 @@ function parseBoardState(raw) {
         const fallbackComments = Array.isArray(parsed.comments)
           ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
           : deriveBoardCommentsFromImages(fallbackImages).map(normalizeBoardComment).filter(Boolean)
+        const fallbackPalettes = Array.isArray(parsed.palettes) ? parsed.palettes.map(normalizePaletteItem).filter(Boolean) : []
         const images = parsedObjects.images.length > 0 ? parsedObjects.images : fallbackImages
         const comments = parsedObjects.comments.length > 0 ? parsedObjects.comments : fallbackComments
-        return rehydrateBoardState(images, comments)
+        const palettes = parsedObjects.palettes.length > 0 ? parsedObjects.palettes : fallbackPalettes
+        return rehydrateBoardState(images, comments, palettes)
       }
       const images = Array.isArray(parsed.images) ? parsed.images.map(normalizeImageItem) : []
       const comments = Array.isArray(parsed.comments)
         ? parsed.comments.map(normalizeBoardComment).filter(Boolean)
         : deriveBoardCommentsFromImages(images).map(normalizeBoardComment).filter(Boolean)
-      return rehydrateBoardState(images, comments)
+      const palettes = Array.isArray(parsed.palettes) ? parsed.palettes.map(normalizePaletteItem).filter(Boolean) : []
+      return rehydrateBoardState(images, comments, palettes)
     }
   } catch {
-    return { images: [], comments: [] }
+    return { images: [], comments: [], palettes: [] }
   }
-  return { images: [], comments: [] }
+  return { images: [], comments: [], palettes: [] }
 }
 
 function fitWithinMax(width, height, maxSize = DEFAULT_IMAGE_MAX) {
@@ -418,6 +580,30 @@ function toCanvasPoint(clientX, clientY, rect, offsetX, offsetY, scale) {
 
 function getImageSize(image) {
   return { width: image.width ?? DEFAULT_IMAGE_MAX, height: image.height ?? DEFAULT_IMAGE_MAX }
+}
+
+function getPaletteSize(palette) {
+  const count = Math.max(1, Array.isArray(palette?.colors) ? palette.colors.length : 0)
+  const columns = Math.min(6, Math.max(3, Math.ceil(Math.sqrt(count))))
+  const swatchSize = 24
+  const gap = 8
+  const padding = 10
+  const rows = Math.ceil(count / columns)
+  const width = padding * 2 + columns * swatchSize + (columns - 1) * gap
+  const height = padding * 2 + rows * swatchSize + (rows - 1) * gap
+  return { width, height, columns, rows, swatchSize, gap, padding }
+}
+
+function getBoundsFromPalette(palette, x = palette.x, y = palette.y) {
+  const size = getPaletteSize(palette)
+  return {
+    left: x,
+    top: y,
+    right: x + size.width,
+    bottom: y + size.height,
+    width: size.width,
+    height: size.height,
+  }
 }
 
 function getRenderedImageBounds(image, naturalSize) {
@@ -775,21 +961,28 @@ function WorldOrigin() {
   return <div className="canvas-world-origin" aria-hidden="true" />
 }
 
+function getBoardStorageKey(boardId) {
+  return `kanvaref:board:${boardId}`
+}
+
 export function Canvas() {
   const navigate = useNavigate()
   const { id: boardId } = useParams()
+  const boardStorageKey = getBoardStorageKey(boardId)
   const legacyStorageKey = `curate-board-${boardId}`
-  const storageKey = STORAGE_KEY
   const snappingStorageKey = `curate-board-snap-${boardId}`
   const imageSnappingStorageKey = `curate-board-snap-images-${boardId}`
 
   const [images, setImages] = useState([])
   const [comments, setComments] = useState([])
+  const [palettes, setPalettes] = useState([])
   const [scale, setScale] = useState(1)
   const [offsetX, setOffsetX] = useState(0)
   const [offsetY, setOffsetY] = useState(0)
   const [selectedImageIds, setSelectedImageIds] = useState([])
+  const [selectedPaletteIds, setSelectedPaletteIds] = useState([])
   const [dragState, setDragState] = useState(null)
+  const [paletteDragState, setPaletteDragState] = useState(null)
   const [commentDragState, setCommentDragState] = useState(null)
   const [resizeState, setResizeState] = useState(null)
   const [panState, setPanState] = useState(null)
@@ -830,6 +1023,7 @@ export function Canvas() {
   const [pasteFeedback, setPasteFeedback] = useState('')
   const [lockFeedback, setLockFeedback] = useState('')
   const [isPasteAvailable, setIsPasteAvailable] = useState(false)
+  const [isExtractingPalette, setIsExtractingPalette] = useState(false)
   const [isAltDragHintVisible, setIsAltDragHintVisible] = useState(false)
 
   const canvasRef = useRef(null)
@@ -848,17 +1042,73 @@ export function Canvas() {
   const offsetYRef = useRef(offsetY)
   const imagesRef = useRef(images)
   const commentsRef = useRef(comments)
+  const palettesRef = useRef(palettes)
   const selectedIdsRef = useRef(selectedImageIds)
+  const selectedPaletteIdsRef = useRef(selectedPaletteIds)
   const historyRef = useRef(history)
   const futureRef = useRef(future)
   const applyCropByRectRef = useRef(null)
-  const didHydrateRef = useRef(false)
   const previousImageSrcsRef = useRef(new Map())
   const persistCountRef = useRef(0)
 
+  function resetBoardRuntimeState() {
+    setImages([])
+    setComments([])
+    setPalettes([])
+    setSelectedImageIds([])
+    setSelectedPaletteIds([])
+    setHistory([])
+    setFuture([])
+    setScale(1)
+    setOffsetX(0)
+    setOffsetY(0)
+    setDragState(null)
+    setPaletteDragState(null)
+    setCommentDragState(null)
+    setResizeState(null)
+    setPanState(null)
+    setMarqueeState(null)
+    setMenuState(null)
+    setIsSpaceDown(false)
+    setCropMode(null)
+    setCropInteraction(null)
+    setIsQuickCropKeyDown(false)
+    setQuickCropState(null)
+    setIsCommentMode(false)
+    setIsCanvasLocked(false)
+    setIsMagneticSnapEnabled(false)
+    setMagneticSnapLinkedIds([])
+    setActiveCommentRef(null)
+    setCommentDraft('')
+    setCommentSaveState('idle')
+    setSmartGuides({ vertical: null, horizontal: null })
+    setPasteFeedback('')
+    setLockFeedback('')
+    setIsExtractingPalette(false)
+    setIsAltDragHintVisible(false)
+    setImageNaturalSizes({})
+
+    imagesRef.current = []
+    commentsRef.current = []
+    palettesRef.current = []
+    selectedIdsRef.current = []
+    selectedPaletteIdsRef.current = []
+    historyRef.current = []
+    futureRef.current = []
+    scaleRef.current = 1
+    offsetXRef.current = 0
+    offsetYRef.current = 0
+    previousImageSrcsRef.current = new Map()
+  }
+
   async function restoreBoard() {
+    resetBoardRuntimeState()
     try {
-      const saved = localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey) || null
+      const saved = localStorage.getItem(boardStorageKey) || localStorage.getItem(legacyStorageKey) || null
+      if (!saved) {
+        console.log('[Curate] Initialized empty board', { storageKey: boardStorageKey })
+        return
+      }
       const parsed = parseBoardState(saved)
       const hydratedImages = await Promise.all(
         (Array.isArray(parsed.images) ? parsed.images : []).map(async (rawImage) => {
@@ -874,10 +1124,11 @@ export function Canvas() {
         }),
       )
       setComments(Array.isArray(parsed.comments) ? parsed.comments : [])
+      setPalettes(Array.isArray(parsed.palettes) ? parsed.palettes : [])
       setImages(hydratedImages)
       console.log('[Curate] Hydrated board once', {
         imagesCount: hydratedImages.length,
-        storageKey,
+        storageKey: boardStorageKey,
       })
     } catch (error) {
       console.error('[Curate] Failed to load board:', error)
@@ -885,10 +1136,8 @@ export function Canvas() {
   }
 
   useEffect(() => {
-    if (didHydrateRef.current) return
-    didHydrateRef.current = true
     void restoreBoard()
-  }, [])
+  }, [boardStorageKey, legacyStorageKey])
 
   useEffect(() => {
     scaleRef.current = scale
@@ -901,6 +1150,9 @@ export function Canvas() {
   useEffect(() => {
     commentsRef.current = comments
   }, [comments])
+  useEffect(() => {
+    palettesRef.current = palettes
+  }, [palettes])
   useEffect(() => {
     const previous = previousImageSrcsRef.current
     const next = new Map(images.map((image) => [image.id, image.src]))
@@ -925,6 +1177,9 @@ export function Canvas() {
   useEffect(() => {
     selectedIdsRef.current = selectedImageIds
   }, [selectedImageIds])
+  useEffect(() => {
+    selectedPaletteIdsRef.current = selectedPaletteIds
+  }, [selectedPaletteIds])
   useEffect(() => {
     historyRef.current = history
   }, [history])
@@ -1048,11 +1303,12 @@ export function Canvas() {
       const boardState = {
         images: serializeImagesForStorage(images),
         comments: serializeCommentsForStorage(comments),
+        palettes: serializePalettesForStorage(palettes),
       }
       persistCountRef.current += 1
       console.log('[Curate] Persisting board state', { persistCount: persistCountRef.current, imageCount: boardState.images.length })
       localStorage.setItem(
-        storageKey,
+        boardStorageKey,
         JSON.stringify(boardState),
       )
       localStorage.setItem(
@@ -1062,14 +1318,14 @@ export function Canvas() {
     } catch (error) {
       console.error('[Curate] Failed to persist board:', error)
     }
-  }, [images, comments, storageKey, legacyStorageKey])
+  }, [images, comments, palettes, boardStorageKey, legacyStorageKey])
 
   useEffect(() => {
     console.log('[Curate] Loaded board state', {
       imagesCount: images.length,
-      storageKey,
+      storageKey: boardStorageKey,
     })
-  }, [])
+  }, [boardStorageKey, images.length])
 
   useEffect(() => {
     setIsSnappingEnabled(localStorage.getItem(snappingStorageKey) === 'true')
@@ -1088,10 +1344,10 @@ export function Canvas() {
     localStorage.setItem(imageSnappingStorageKey, String(isImageSnappingEnabled))
   }, [imageSnappingStorageKey, isImageSnappingEnabled])
 
-  function commitHistory(previousImages, previousSelected, previousComments = commentsRef.current) {
+  function commitHistory(previousImages, previousSelected, previousComments = commentsRef.current, previousPalettes = palettesRef.current) {
     // Called only for meaningful operations, so push this snapshot directly.
     setHistory((prev) => {
-      const next = [...prev, { images: previousImages, comments: previousComments, selectedImageIds: previousSelected }]
+      const next = [...prev, { images: previousImages, comments: previousComments, palettes: previousPalettes, selectedImageIds: previousSelected }]
       return next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next
     })
     setFuture([])
@@ -1102,6 +1358,7 @@ export function Canvas() {
     return (
       JSON.stringify(snapshot.images) !== JSON.stringify(imagesRef.current) ||
       JSON.stringify(snapshot.comments ?? commentsRef.current) !== JSON.stringify(commentsRef.current) ||
+      JSON.stringify(snapshot.palettes ?? palettesRef.current) !== JSON.stringify(palettesRef.current) ||
       JSON.stringify(snapshot.selectedImageIds) !== JSON.stringify(selectedIdsRef.current)
     )
   }
@@ -1287,7 +1544,7 @@ export function Canvas() {
     const prevHistory = historyRef.current
     if (prevHistory.length === 0) return false
     const previousState = prevHistory[prevHistory.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = { images: imagesRef.current, comments: commentsRef.current, palettes: palettesRef.current, selectedImageIds: selectedIdsRef.current }
     const nextHistory = prevHistory.slice(0, -1)
     const nextFuture = [...futureRef.current, currentState]
     const clampedFuture = nextFuture.length > HISTORY_LIMIT ? nextFuture.slice(nextFuture.length - HISTORY_LIMIT) : nextFuture
@@ -1297,7 +1554,9 @@ export function Canvas() {
     setFuture(clampedFuture)
     setImages(previousState.images)
     setComments(previousState.comments ?? commentsRef.current)
+    setPalettes(previousState.palettes ?? palettesRef.current)
     setSelectedImageIds(previousState.selectedImageIds)
+    setSelectedPaletteIds([])
     setMenuState(null)
     return true
   }
@@ -1306,7 +1565,7 @@ export function Canvas() {
     const prevFuture = futureRef.current
     if (prevFuture.length === 0) return false
     const nextState = prevFuture[prevFuture.length - 1]
-    const currentState = { images: imagesRef.current, comments: commentsRef.current, selectedImageIds: selectedIdsRef.current }
+    const currentState = { images: imagesRef.current, comments: commentsRef.current, palettes: palettesRef.current, selectedImageIds: selectedIdsRef.current }
     const nextFuture = prevFuture.slice(0, -1)
     const nextHistory = [...historyRef.current, currentState]
     const clampedHistory = nextHistory.length > HISTORY_LIMIT ? nextHistory.slice(nextHistory.length - HISTORY_LIMIT) : nextHistory
@@ -1316,7 +1575,9 @@ export function Canvas() {
     setFuture(nextFuture)
     setImages(nextState.images)
     setComments(nextState.comments ?? commentsRef.current)
+    setPalettes(nextState.palettes ?? palettesRef.current)
     setSelectedImageIds(nextState.selectedImageIds)
+    setSelectedPaletteIds([])
     setMenuState(null)
     return true
   }
@@ -1519,38 +1780,87 @@ export function Canvas() {
     return () => window.removeEventListener('curate:toolbar-action', handleToolbarAction)
   }, [isCommentMode, isCanvasLocked, isMagneticSnapEnabled, offsetX, offsetY, scale, images])
 
+  function buildPaletteCopyText(colors, format) {
+    if (!Array.isArray(colors) || colors.length === 0) return ''
+    if (format === 'hex-vertical') return colors.join('\n')
+    if (format === 'hex-comma') return colors.join(', ')
+    if (format === 'css-vars') {
+      return colors.map((color, index) => `--color-${index + 1}: ${color};`).join('\n')
+    }
+    if (format === 'tailwind') {
+      const names = ['primary', 'secondary', 'accent', 'muted', 'surface', 'ink']
+      const rows = colors.map((color, index) => `  ${names[index] || `color${index + 1}`}: "${color}",`)
+      return `colors: {\n${rows.join('\n')}\n}`
+    }
+    if (format === 'json') {
+      return JSON.stringify({ colors }, null, 2)
+    }
+    return colors.join('\n')
+  }
+
+  async function handleCopyPalette(format) {
+    const paletteId = selectedPaletteIdsRef.current[0]
+    if (!paletteId) return
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return
+    }
+    const palette = palettesRef.current.find((entry) => entry.id === paletteId)
+    if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return
+    const text = buildPaletteCopyText(palette.colors, format)
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setPasteFeedback('Palette copied')
+      setMenuState(null)
+    } catch {
+      setPasteFeedback('Clipboard unavailable')
+    }
+  }
+
+  function deleteSelectedCanvasItems() {
+    const imageIds = selectedIdsRef.current
+    const paletteIds = selectedPaletteIdsRef.current
+    if (imageIds.length === 0 && paletteIds.length === 0) return
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return
+    }
+    const imageDeleteSet = new Set(imageIds)
+    const paletteDeleteSet = new Set(paletteIds)
+    const prevImages = imagesRef.current
+    const prevSelected = selectedIdsRef.current
+    const prevComments = commentsRef.current
+    const prevPalettes = palettesRef.current
+    const imagesToDelete = prevImages.filter((image) => imageDeleteSet.has(image.id))
+    setImages((prev) => prev.filter((image) => !imageDeleteSet.has(image.id)))
+    setPalettes((prev) => prev.filter((palette) => !paletteDeleteSet.has(palette.id)))
+    setSelectedImageIds([])
+    setSelectedPaletteIds([])
+    setMenuState(null)
+    commitHistory(prevImages, prevSelected, prevComments, prevPalettes)
+    void Promise.all(imagesToDelete.map((image) => deleteImageBlobById(image.id))).catch(() => {
+      // Ignore blob cleanup failure; metadata removal is already complete.
+    })
+  }
+
   useEffect(() => {
     function handleDelete(event) {
-      if (selectedImageIds.length === 0) return
+      if (selectedImageIds.length === 0 && selectedPaletteIds.length === 0) return
       if (event.key !== 'Delete' && event.key !== 'Backspace') return
       if (isTypingTarget(event.target)) return
-      if (!canTransform) {
-        event.preventDefault()
-        showLockBlockedFeedback()
-        return
-      }
       event.preventDefault()
-      const prevImages = imagesRef.current
-      const prevSelected = selectedIdsRef.current
-      const imagesToDelete = prevImages.filter((image) => selectedImageIds.includes(image.id))
-      setImages((prev) => prev.filter((image) => !selectedImageIds.includes(image.id)))
-      setSelectedImageIds([])
-      setMenuState(null)
-      commitHistory(prevImages, prevSelected)
-      void Promise.all(
-        imagesToDelete.map((image) => deleteImageBlobById(image.id)),
-      ).catch(() => {
-        // Ignore blob cleanup failure; metadata removal is already complete.
-      })
+      deleteSelectedCanvasItems()
     }
     window.addEventListener('keydown', handleDelete)
     return () => window.removeEventListener('keydown', handleDelete)
-  }, [canTransform, selectedImageIds])
+  }, [canTransform, selectedImageIds, selectedPaletteIds])
 
   useEffect(() => {
     if (!isCanvasLocked) return
-    if (!dragState && !resizeState && !panState && !marqueeState && !cropInteraction && !quickCropState && !cropMode) return
+    if (!dragState && !paletteDragState && !resizeState && !panState && !marqueeState && !cropInteraction && !quickCropState && !cropMode) return
     setDragState(null)
+    setPaletteDragState(null)
     setResizeState(null)
     setPanState(null)
     setMarqueeState(null)
@@ -1559,7 +1869,7 @@ export function Canvas() {
     setCropMode(null)
     setSmartGuides({ vertical: null, horizontal: null })
     setMagneticSnapLinkedIds([])
-  }, [isCanvasLocked, dragState, resizeState, panState, marqueeState, cropInteraction, quickCropState, cropMode])
+  }, [isCanvasLocked, dragState, paletteDragState, resizeState, panState, marqueeState, cropInteraction, quickCropState, cropMode])
 
   useEffect(() => {
     function handleKeyActions(event) {
@@ -1664,6 +1974,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const prevSelected = selectedIdsRef.current
     setImages((prev) => [...prev, ...newImages])
     setSelectedImageIds(newImages.map((image) => image.id))
+    setSelectedPaletteIds([])
     setPasteCount((prev) => prev + 1)
     setMenuState(null)
     commitHistory(prevImages, prevSelected)
@@ -1690,6 +2001,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const prevSelected = selectedIdsRef.current
     setImages((prev) => [...prev, ...pasted])
     setSelectedImageIds(pasted.map((image) => image.id))
+    setSelectedPaletteIds([])
     setPasteCount((prev) => prev + 1)
     setMenuState(null)
     commitHistory(prevImages, prevSelected)
@@ -1781,6 +2093,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       const prevSelected = selectedIdsRef.current
       setImages((prev) => [...prev, pastedImage])
       setSelectedImageIds([pastedImage.id])
+      setSelectedPaletteIds([])
       setPasteCount((prev) => prev + 1)
       setMenuState(null)
       commitHistory(prevImages, prevSelected)
@@ -1793,7 +2106,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
   }
 
   useEffect(() => {
-    if (!dragState && !commentDragState && !panState && !resizeState && !marqueeState && !cropInteraction && !quickCropState) return
+    if (!dragState && !paletteDragState && !commentDragState && !panState && !resizeState && !marqueeState && !cropInteraction && !quickCropState) return
     function handleMouseMove(event) {
       const rect = canvasRef.current?.getBoundingClientRect()
       if (!rect) return
@@ -2074,6 +2387,38 @@ async function createImagesFromFiles(files, baseX, baseY) {
             return { ...nextImage, x: start.x + dx, y: start.y + dy }
           }),
         )
+        if (dragState.initialPalettePositions && Object.keys(dragState.initialPalettePositions).length > 0) {
+          setPalettes((prev) =>
+            prev.map((palette) => {
+              const start = dragState.initialPalettePositions[palette.id]
+              if (!start) return palette
+              return { ...palette, x: start.x + dx, y: start.y + dy }
+            }),
+          )
+        }
+        return
+      }
+
+      if (paletteDragState) {
+        const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
+        const dx = pointer.x - paletteDragState.startPointerX
+        const dy = pointer.y - paletteDragState.startPointerY
+        setPalettes((prev) =>
+          prev.map((palette) => {
+            const start = paletteDragState.initialPalettePositions[palette.id]
+            if (!start) return palette
+            return { ...palette, x: start.x + dx, y: start.y + dy }
+          }),
+        )
+        if (Object.keys(paletteDragState.initialImagePositions).length > 0) {
+          setImages((prev) =>
+            prev.map((image) => {
+              const start = paletteDragState.initialImagePositions[image.id]
+              if (!start) return image
+              return { ...image, x: start.x + dx, y: start.y + dy }
+            }),
+          )
+        }
         return
       }
 
@@ -2167,6 +2512,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
         }
       }
       let didAltDetachUpdate = false
+      let didPaletteGroupUpdate = false
       if (dragState?.altOverride) {
         const draggedSet = new Set(dragState.draggedIds)
         setImages((prev) => {
@@ -2215,9 +2561,81 @@ async function createImagesFromFiles(files, baseX, baseY) {
           return didChange ? next : prev
         })
       }
+      if (paletteDragState) {
+        const draggedPaletteIds = new Set(paletteDragState.draggedPaletteIds ?? [])
+        if (paletteDragState.altOverride || !isMagneticSnapEnabled) {
+          setPalettes((prev) => {
+            let changed = false
+            const next = prev.map((palette) => {
+              if (!draggedPaletteIds.has(palette.id)) return palette
+              if (!palette.magneticGroupId) return palette
+              changed = true
+              return { ...palette, magneticGroupId: null }
+            })
+            if (changed) didPaletteGroupUpdate = true
+            return changed ? next : prev
+          })
+        } else {
+          const imagesSnapshot = imagesRef.current
+          const palettesSnapshot = palettesRef.current
+          const imageUpdates = new Map()
+          const paletteUpdates = new Map()
+          for (const palette of palettesSnapshot) {
+            if (!draggedPaletteIds.has(palette.id)) continue
+            const paletteBounds = getBoundsFromPalette(palette)
+            let best = null
+            for (const image of imagesSnapshot) {
+              const imageBounds = getBoundsFromImage(image)
+              const distance = getMinEdgeDistance(paletteBounds, imageBounds)
+              if (distance > MAGNETIC_SNAP_EDGE_THRESHOLD) continue
+              if (!best || distance < best.distance) best = { imageId: image.id, distance }
+            }
+            if (!best) continue
+            const targetImage = imagesSnapshot.find((image) => image.id === best.imageId)
+            if (!targetImage) continue
+            const groupId = targetImage.magneticGroupId || palette.magneticGroupId || crypto.randomUUID()
+            imageUpdates.set(targetImage.id, groupId)
+            paletteUpdates.set(palette.id, groupId)
+          }
+          if (imageUpdates.size > 0) {
+            setImages((prev) => {
+              let changed = false
+              const next = prev.map((image) => {
+                const groupId = imageUpdates.get(image.id)
+                if (!groupId || image.magneticGroupId === groupId) return image
+                changed = true
+                return { ...image, magneticGroupId: groupId }
+              })
+              if (changed) didPaletteGroupUpdate = true
+              return changed ? next : prev
+            })
+          }
+          if (paletteUpdates.size > 0) {
+            setPalettes((prev) => {
+              let changed = false
+              const next = prev.map((palette) => {
+                const groupId = paletteUpdates.get(palette.id)
+                if (!groupId || palette.magneticGroupId === groupId) return palette
+                changed = true
+                return { ...palette, magneticGroupId: groupId }
+              })
+              if (changed) didPaletteGroupUpdate = true
+              return changed ? next : prev
+            })
+          }
+        }
+      }
 
       if (didAltDetachUpdate || hasSnapshotChanged(dragState?.historySnapshot)) {
         commitHistory(dragState.historySnapshot.images, dragState.historySnapshot.selectedImageIds)
+      }
+      if (paletteDragState && (didPaletteGroupUpdate || hasSnapshotChanged(paletteDragState.historySnapshot))) {
+        commitHistory(
+          paletteDragState.historySnapshot.images,
+          paletteDragState.historySnapshot.selectedImageIds,
+          paletteDragState.historySnapshot.comments,
+          paletteDragState.historySnapshot.palettes,
+        )
       }
       if (hasSnapshotChanged(resizeState?.historySnapshot)) {
         commitHistory(resizeState.historySnapshot.images, resizeState.historySnapshot.selectedImageIds)
@@ -2231,6 +2649,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       }
       setDragState(null)
       setCommentDragState(null)
+      setPaletteDragState(null)
       setSmartGuides({ vertical: null, horizontal: null })
       setPanState(null)
       setResizeState(null)
@@ -2244,7 +2663,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled, isMagneticSnapEnabled, isCommentMode, isCanvasLocked, isAltDragHintVisible])
+  }, [dragState, paletteDragState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled, isMagneticSnapEnabled, isCommentMode, isCanvasLocked, isAltDragHintVisible])
 
   function handleDragOver(event) {
     if (quickCropState) return
@@ -2311,6 +2730,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const prevSelected = selectedIdsRef.current
     setImages((prev) => [...prev, ...newImages])
     setSelectedImageIds(newImages.map((image) => image.id))
+    setSelectedPaletteIds([])
     commitHistory(prevImages, prevSelected)
   }
 
@@ -2339,6 +2759,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     event.stopPropagation()
     setMenuState(null)
     if (!canTransform) {
+      setSelectedPaletteIds([])
       if (!selectedImageIds.includes(image.id)) setSelectedImageIds([image.id])
       showLockBlockedFeedback()
       return
@@ -2371,6 +2792,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       return
     }
     if (event.shiftKey) {
+      setSelectedPaletteIds([])
       setSelectedImageIds((prev) => (prev.includes(image.id) ? prev.filter((id) => id !== image.id) : [...prev, image.id]))
       return
     }
@@ -2379,14 +2801,27 @@ async function createImagesFromFiles(files, baseX, baseY) {
     const baseDraggedIds = isAlreadySelected ? selectedImageIds : [image.id]
     const draggedIds = isAltOverride ? baseDraggedIds : expandIdsWithPersistentGroups(baseDraggedIds, images)
     if (!isAlreadySelected) setSelectedImageIds([image.id])
+    setSelectedPaletteIds([])
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
     const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
     const initialPositions = {}
     const initialAllPositions = {}
+    const initialPalettePositions = {}
     for (const currentImage of images) {
       initialAllPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
       if (draggedIds.includes(currentImage.id)) initialPositions[currentImage.id] = { x: currentImage.x, y: currentImage.y }
+    }
+    if (!isAltOverride) {
+      const draggedGroupIds = new Set(
+        images
+          .filter((entry) => draggedIds.includes(entry.id) && entry.magneticGroupId)
+          .map((entry) => entry.magneticGroupId),
+      )
+      for (const paletteEntry of palettes) {
+        if (!paletteEntry.magneticGroupId || !draggedGroupIds.has(paletteEntry.magneticGroupId)) continue
+        initialPalettePositions[paletteEntry.id] = { x: paletteEntry.x, y: paletteEntry.y }
+      }
     }
     setDragState({
       primaryId: image.id,
@@ -2396,6 +2831,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       startPointerY: pointer.y,
       initialPositions,
       initialAllPositions,
+      initialPalettePositions,
       altOverride: isAltOverride,
       blockedLinkIds: [],
       blockedGroupIds: [],
@@ -2414,6 +2850,64 @@ async function createImagesFromFiles(files, baseX, baseY) {
     maybeShowAltDragHint(event, image)
   }
 
+  function handlePaletteMouseDown(event, palette) {
+    if (event.button !== 0) return
+    if (cropMode || isCommentMode) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenuState(null)
+    setSelectedImageIds([])
+    setSelectedPaletteIds([palette.id])
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return
+    }
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
+    const isAltOverride = event.altKey
+    const linkedGroupId = !isAltOverride ? palette.magneticGroupId : null
+    const draggedPaletteIds = linkedGroupId
+      ? palettes.filter((entry) => entry.magneticGroupId === linkedGroupId).map((entry) => entry.id)
+      : [palette.id]
+    const initialPalettePositions = {}
+    for (const currentPalette of palettes) {
+      if (draggedPaletteIds.includes(currentPalette.id)) {
+        initialPalettePositions[currentPalette.id] = { x: currentPalette.x, y: currentPalette.y }
+      }
+    }
+    const initialImagePositions = {}
+    if (linkedGroupId) {
+      for (const image of images) {
+        if (image.magneticGroupId !== linkedGroupId) continue
+        initialImagePositions[image.id] = { x: image.x, y: image.y }
+      }
+    }
+    setPaletteDragState({
+      paletteId: palette.id,
+      draggedPaletteIds,
+      altOverride: isAltOverride,
+      startPointerX: pointer.x,
+      startPointerY: pointer.y,
+      initialPalettePositions,
+      initialImagePositions,
+      historySnapshot: {
+        images: imagesRef.current,
+        comments: commentsRef.current,
+        palettes: palettesRef.current,
+        selectedImageIds: selectedIdsRef.current,
+      },
+    })
+  }
+
+  function handlePaletteContextMenu(event, palette) {
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedImageIds([])
+    setSelectedPaletteIds([palette.id])
+    setMenuState({ type: 'palette', x: event.clientX, y: event.clientY })
+  }
+
   function handleResizeHandleMouseDown(event, image, handle) {
     if (!canTransform) {
       showLockBlockedFeedback()
@@ -2423,6 +2917,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
     event.preventDefault()
     event.stopPropagation()
     setMenuState(null)
+    setSelectedPaletteIds([])
     setSelectedImageIds([image.id])
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -2465,6 +2960,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
 
   function handleCanvasMouseDown(event) {
     setMenuState(null)
+    if (event.button === 0) {
+      setSelectedPaletteIds([])
+    }
     if (activeCommentRef) {
       closeCommentEditorFromOutside()
     }
@@ -2569,6 +3067,10 @@ async function createImagesFromFiles(files, baseX, baseY) {
     void checkPasteAvailabilityOnMenuOpen()
     if (selectedImageIds.length > 0) {
       setMenuState({ type: 'image', x: event.clientX, y: event.clientY })
+      return
+    }
+    if (selectedPaletteIds.length > 0) {
+      setMenuState({ type: 'palette', x: event.clientX, y: event.clientY })
       return
     }
     setMenuState({ type: 'canvas', x: event.clientX, y: event.clientY })
@@ -2693,6 +3195,84 @@ async function createImagesFromFiles(files, baseX, baseY) {
     commitHistory(prevImages, prevSelected)
   }
 
+  function getPaletteExtractionSourceImages() {
+    const selected = images.filter((image) => selectedImageIds.includes(image.id))
+    if (selected.length >= 2) return selected
+    if (selected.length === 1) {
+      const groupId = selected[0].magneticGroupId
+      if (!groupId) return selected
+      const grouped = images.filter((image) => image.magneticGroupId === groupId)
+      return grouped.length > 1 ? grouped : selected
+    }
+    return []
+  }
+
+  async function handleExtractColorPalette() {
+    if (!canTransform) {
+      showLockBlockedFeedback()
+      return
+    }
+    const sourceImages = getPaletteExtractionSourceImages()
+    if (sourceImages.length === 0) return
+    let loadingTimerId = null
+    try {
+      loadingTimerId = window.setTimeout(() => setIsExtractingPalette(true), 100)
+      const colors = await extractPaletteColorsFromImages(sourceImages)
+      if (colors.length === 0) {
+        setPasteFeedback('No extractable colors found')
+        setMenuState(null)
+        return
+      }
+      const prevImages = imagesRef.current
+      const prevSelected = selectedIdsRef.current
+      const prevComments = commentsRef.current
+      const prevPalettes = palettesRef.current
+      const left = Math.min(...sourceImages.map((image) => image.x))
+      const top = Math.min(...sourceImages.map((image) => image.y))
+      const right = Math.max(...sourceImages.map((image) => image.x + getImageSize(image).width))
+      const paletteId = crypto.randomUUID()
+      const createdFromGroupId =
+        sourceImages.length === 1
+          ? (sourceImages[0].magneticGroupId ?? null)
+          : (() => {
+              const ids = [...new Set(sourceImages.map((image) => image.magneticGroupId).filter(Boolean))]
+              return ids.length === 1 ? ids[0] : null
+            })()
+      const singleSourceImage = sourceImages.length === 1 ? sourceImages[0] : null
+      const palette = normalizePaletteItem({
+        id: paletteId,
+        x: singleSourceImage ? singleSourceImage.x + 24 : right + 28,
+        y: singleSourceImage ? singleSourceImage.y + 24 : top,
+        colors,
+        createdFromGroupId,
+        magneticGroupId: null,
+        createdAt: Date.now(),
+      })
+      if (!palette) return
+      setPalettes((prev) => [...prev, palette])
+      setSelectedImageIds([])
+      setSelectedPaletteIds([palette.id])
+      setMenuState(null)
+      commitHistory(prevImages, prevSelected, prevComments, prevPalettes)
+      setPasteFeedback('Color palette created')
+      if (left > palette.x) setOffsetX(offsetXRef.current + (left - palette.x))
+    } finally {
+      if (loadingTimerId !== null) window.clearTimeout(loadingTimerId)
+      setIsExtractingPalette(false)
+    }
+  }
+
+  async function handlePaletteSwatchClick(event, hex) {
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(hex)
+      setPasteFeedback(`${hex} copied`)
+    } catch {
+      setPasteFeedback('Clipboard unavailable')
+    }
+  }
+
   function handleCreateNewBoard() {
     window.open(`/board/${generateBoardId()}`, '_blank', 'noopener,noreferrer')
     setMenuState(null)
@@ -2701,12 +3281,15 @@ async function createImagesFromFiles(files, baseX, baseY) {
   function handleDeleteBoard() {
     const confirmed = window.confirm('Delete this board? This action cannot be undone.')
     if (!confirmed) return
-    localStorage.removeItem(storageKey)
+    localStorage.removeItem(boardStorageKey)
+    localStorage.removeItem(legacyStorageKey)
     localStorage.removeItem(snappingStorageKey)
     localStorage.removeItem(imageSnappingStorageKey)
     setImages([])
     setComments([])
+    setPalettes([])
     setSelectedImageIds([])
+    setSelectedPaletteIds([])
     setMenuState(null)
     navigate(`/board/${generateBoardId()}`, { replace: true })
   }
@@ -2997,6 +3580,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
       ]
     : []
   const canResetSelectedImageCropTransform = selectedImage ? canResetCropOrTransform(selectedImage) : false
+  const selectedPalette = selectedPaletteIds.length === 1 ? palettes.find((palette) => palette.id === selectedPaletteIds[0]) ?? null : null
+  const canDeleteSelection = !isCanvasLocked && (selectedImageIds.length > 0 || selectedPaletteIds.length > 0)
+  const canCopySelectedPalette = !isCanvasLocked && Boolean(selectedPalette)
   const cropModeImage = cropMode ? images.find((image) => image.id === cropMode.id) ?? null : null
   const cropModeImageBounds = cropModeImage ? getImageBounds(cropModeImage) : null
   const cropMaskInsets = cropMode && cropModeImageBounds
@@ -3015,8 +3601,11 @@ async function createImagesFromFiles(files, baseX, baseY) {
         height: Math.abs(quickCropState.currentY - quickCropState.startY),
       }
     : null
+  const paletteSourceImages = getPaletteExtractionSourceImages()
+  const canExtractPalette = !isCanvasLocked && !isExtractingPalette && paletteSourceImages.length > 0
   const hasImages = images.length > 0
-  const shouldShowWorldOrigin = scale < 1.2 || !hasImages
+  const hasCanvasItems = images.length > 0 || palettes.length > 0
+  const shouldShowWorldOrigin = scale < 1.2 || !hasCanvasItems
   const commentPins = comments.map((comment) => {
     const world = getCommentWorldPosition(comment, images)
     return {
@@ -3097,6 +3686,37 @@ async function createImagesFromFiles(files, baseX, baseY) {
               }}
             />
           ) : null}
+          {palettes.map((palette) => {
+            const size = getPaletteSize(palette)
+            return (
+              <div
+                key={palette.id}
+                className={`canvas-palette-node ${selectedPaletteIds.includes(palette.id) ? 'is-selected' : ''}`.trim()}
+                style={{
+                  left: `${palette.x}px`,
+                  top: `${palette.y}px`,
+                  width: `${size.width}px`,
+                  minHeight: `${size.height}px`,
+                  gridTemplateColumns: `repeat(${size.columns}, ${size.swatchSize}px)`,
+                }}
+                onMouseDown={(event) => handlePaletteMouseDown(event, palette)}
+                onContextMenu={(event) => handlePaletteContextMenu(event, palette)}
+              >
+                {palette.colors.map((color) => (
+                  <button
+                    key={`${palette.id}-${color}`}
+                    type="button"
+                    className="canvas-palette-swatch"
+                    style={{ backgroundColor: color, width: `${size.swatchSize}px`, height: `${size.swatchSize}px` }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => void handlePaletteSwatchClick(event, color)}
+                    title={color}
+                    aria-label={`Copy ${color}`}
+                  />
+                ))}
+              </div>
+            )
+          })}
           {images.map((image) => {
             const size = getImageSize(image)
             const renderSrc = getRenderableImageSrc(image.src)
@@ -3329,6 +3949,17 @@ async function createImagesFromFiles(files, baseX, baseY) {
                 </MenuIcon>
                 <span className="canvas-menu-item__label">{isCommentMode ? 'Disable comment mode' : 'Enable comment mode'}</span>
               </button>
+              <button
+                type="button"
+                className={`canvas-menu-item ${canExtractPalette ? '' : 'is-disabled'}`.trim()}
+                onClick={handleExtractColorPalette}
+                disabled={!canExtractPalette}
+              >
+                <MenuIcon>
+                  <LayoutGrid size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                </MenuIcon>
+                <span className="canvas-menu-item__label">{isExtractingPalette ? 'Extracting color palette...' : 'Extract Color Palette'}</span>
+              </button>
               {selectedImageIds.length === 1 && canResetSelectedImageCropTransform ? (
                 <button
                   type="button"
@@ -3402,6 +4033,89 @@ async function createImagesFromFiles(files, baseX, baseY) {
                   </div>
                 </>
               ) : null}
+              <div className="canvas-context-menu__divider" />
+              <button
+                type="button"
+                className={`canvas-menu-item is-danger ${canDeleteSelection ? '' : 'is-disabled'}`.trim()}
+                onClick={deleteSelectedCanvasItems}
+                disabled={!canDeleteSelection}
+              >
+                <MenuIcon>
+                  <Trash2 size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                </MenuIcon>
+                <span className="canvas-menu-item__label">{selectedImageIds.length > 1 ? 'Delete Selected' : 'Delete'}</span>
+              </button>
+            </>
+          ) : menuState.type === 'palette' ? (
+            <>
+              <div className="canvas-menu-submenu">
+                <button type="button" className="canvas-menu-item canvas-menu-submenu__trigger">
+                  <MenuIcon>
+                    <LayoutGrid size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                  </MenuIcon>
+                  <span className="canvas-menu-item__label">Color Palette</span>
+                  <span className="canvas-menu-submenu__chevron" aria-hidden="true"><ChevronRight size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+                </button>
+                <div className="canvas-menu-submenu__panel">
+                  <button
+                    type="button"
+                    className={`canvas-menu-item ${canCopySelectedPalette ? '' : 'is-disabled'}`.trim()}
+                    onClick={() => void handleCopyPalette('hex-vertical')}
+                    disabled={!canCopySelectedPalette}
+                  >
+                    <MenuIcon><Clipboard size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon>
+                    <span className="canvas-menu-item__label">Copy as HEX (vertical list)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`canvas-menu-item ${canCopySelectedPalette ? '' : 'is-disabled'}`.trim()}
+                    onClick={() => void handleCopyPalette('hex-comma')}
+                    disabled={!canCopySelectedPalette}
+                  >
+                    <MenuIcon><Clipboard size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon>
+                    <span className="canvas-menu-item__label">Copy as HEX (comma-separated)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`canvas-menu-item ${canCopySelectedPalette ? '' : 'is-disabled'}`.trim()}
+                    onClick={() => void handleCopyPalette('css-vars')}
+                    disabled={!canCopySelectedPalette}
+                  >
+                    <MenuIcon><Clipboard size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon>
+                    <span className="canvas-menu-item__label">Copy as CSS variables</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`canvas-menu-item ${canCopySelectedPalette ? '' : 'is-disabled'}`.trim()}
+                    onClick={() => void handleCopyPalette('tailwind')}
+                    disabled={!canCopySelectedPalette}
+                  >
+                    <MenuIcon><Clipboard size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon>
+                    <span className="canvas-menu-item__label">Copy as Tailwind config</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`canvas-menu-item ${canCopySelectedPalette ? '' : 'is-disabled'}`.trim()}
+                    onClick={() => void handleCopyPalette('json')}
+                    disabled={!canCopySelectedPalette}
+                  >
+                    <MenuIcon><Clipboard size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></MenuIcon>
+                    <span className="canvas-menu-item__label">Copy as JSON</span>
+                  </button>
+                  <div className="canvas-context-menu__divider" />
+                  <button
+                    type="button"
+                    className={`canvas-menu-item is-danger ${canDeleteSelection ? '' : 'is-disabled'}`.trim()}
+                    onClick={deleteSelectedCanvasItems}
+                    disabled={!canDeleteSelection}
+                  >
+                    <MenuIcon>
+                      <Trash2 size={MENU_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} />
+                    </MenuIcon>
+                    <span className="canvas-menu-item__label">Delete Palette</span>
+                  </button>
+                </div>
+              </div>
             </>
           ) : (
             <>

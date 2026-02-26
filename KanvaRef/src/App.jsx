@@ -11,7 +11,9 @@ const ICON_STROKE_WIDTH = 2.3
 const RECENT_BOARDS_KEY = 'curate-recent-boards'
 const MAX_RECENT_BOARDS = 12
 const LOCAL_IMAGE_PREFIXES = ['data:image/', 'blob:', 'idb://']
-const STORAGE_KEY = 'canvas-board-v1'
+function getBoardStorageKey(boardId) {
+  return `kanvaref:board:${boardId}`
+}
 
 function normalizeRecentBoards(value) {
   if (!Array.isArray(value)) return []
@@ -249,8 +251,9 @@ function App() {
     }
 
     try {
-      const storageKey = `curate-board-${currentBoardId}`
-      const rawBoard = localStorage.getItem(storageKey) || localStorage.getItem(STORAGE_KEY)
+      const storageKey = getBoardStorageKey(currentBoardId)
+      const legacyStorageKey = `curate-board-${currentBoardId}`
+      const rawBoard = localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey)
       let parsedBoard = {
         objects: [],
         images: [],
@@ -310,6 +313,7 @@ function App() {
     event.stopPropagation()
     const confirmed = window.confirm('Remove this board from your recent list and local data?')
     if (!confirmed) return
+    localStorage.removeItem(getBoardStorageKey(boardId))
     localStorage.removeItem(`curate-board-${boardId}`)
     localStorage.removeItem(`curate-board-snap-${boardId}`)
     localStorage.removeItem(`curate-board-snap-images-${boardId}`)
