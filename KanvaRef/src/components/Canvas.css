@@ -624,6 +624,52 @@ body.theme-light .canvas-context-menu {
   pointer-events: none;
 }
 
+.canvas-alt-drag-hint {
+  position: fixed;
+  left: 0;
+  top: 0;
+  --hint-x: 0px;
+  --hint-y: 0px;
+  transform: translate3d(var(--hint-x), var(--hint-y), 0);
+  will-change: transform, opacity;
+  z-index: 70;
+  pointer-events: none;
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  background: rgba(28, 33, 41, 0.92);
+  color: rgba(236, 240, 245, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.22),
+    0 1px 4px rgba(0, 0, 0, 0.18);
+  opacity: 0.94;
+  transition: transform 110ms ease-out, opacity 120ms ease-out;
+  animation: canvas-alt-drag-hint-in 180ms ease-out;
+}
+
+body.theme-light .canvas-alt-drag-hint {
+  background: rgba(248, 250, 253, 0.94);
+  color: rgba(25, 34, 46, 0.92);
+  border-color: rgba(28, 38, 50, 0.12);
+  box-shadow:
+    0 6px 16px rgba(20, 28, 38, 0.14),
+    0 1px 4px rgba(20, 28, 38, 0.1);
+}
+
+@keyframes canvas-alt-drag-hint-in {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--hint-x), calc(var(--hint-y) + 4px), 0);
+  }
+  to {
+    opacity: 0.94;
+    transform: translate3d(var(--hint-x), var(--hint-y), 0);
+  }
+}
+
 .canvas-feedback-indicator {
   position: fixed;
   right: 16px;

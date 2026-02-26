@@ -57,6 +57,7 @@ const PASTE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']
 const STORAGE_KEY = 'canvas-board-v1'
 const MAX_IMAGE_DIMENSION = 4096
 const IMAGE_COMPRESSION_QUALITY = 0.8
+const ALT_DRAG_HINT_STORAGE_KEY = 'seenAltDragHint'
 
 function normalizeImageComment(comment) {
   if (!comment || typeof comment !== 'object') return null
@@ -829,6 +830,7 @@ export function Canvas() {
   const [pasteFeedback, setPasteFeedback] = useState('')
   const [lockFeedback, setLockFeedback] = useState('')
   const [isPasteAvailable, setIsPasteAvailable] = useState(false)
+  const [isAltDragHintVisible, setIsAltDragHintVisible] = useState(false)
 
   const canvasRef = useRef(null)
   const menuRef = useRef(null)
@@ -837,6 +839,9 @@ export function Canvas() {
   const commentSaveTimerRef = useRef(null)
   const suppressCommentPinClickRef = useRef(false)
   const lockFeedbackTimerRef = useRef(null)
+  const altDragHintRef = useRef(null)
+  const altDragHintRafRef = useRef(null)
+  const altDragHintPosRef = useRef({ x: 0, y: 0 })
   const lockFeedbackLastAtRef = useRef(0)
   const scaleRef = useRef(scale)
   const offsetXRef = useRef(offsetX)
@@ -953,8 +958,41 @@ export function Canvas() {
     return () => {
       if (commentSaveTimerRef.current) window.clearTimeout(commentSaveTimerRef.current)
       if (lockFeedbackTimerRef.current) window.clearTimeout(lockFeedbackTimerRef.current)
+      if (altDragHintRafRef.current) window.cancelAnimationFrame(altDragHintRafRef.current)
     }
   }, [])
+
+  function updateAltDragHintPosition(clientX, clientY) {
+    altDragHintPosRef.current = { x: clientX + 12, y: clientY + 16 }
+    if (altDragHintRafRef.current) return
+    altDragHintRafRef.current = window.requestAnimationFrame(() => {
+      altDragHintRafRef.current = null
+      const node = altDragHintRef.current
+      if (!node) return
+      node.style.setProperty('--hint-x', `${altDragHintPosRef.current.x}px`)
+      node.style.setProperty('--hint-y', `${altDragHintPosRef.current.y}px`)
+    })
+  }
+
+  function hideAltDragHint() {
+    setIsAltDragHintVisible(false)
+  }
+
+  function maybeShowAltDragHint(event, image) {
+    if (!event || event.altKey) return
+    if (!image?.magneticGroupId) return
+    if (isCanvasLocked || cropMode || cropInteraction || resizeState) return
+    const groupMemberCount = imagesRef.current.filter((entry) => entry.magneticGroupId === image.magneticGroupId).length
+    if (groupMemberCount < 2) return
+    try {
+      if (localStorage.getItem(ALT_DRAG_HINT_STORAGE_KEY) === 'true') return
+      localStorage.setItem(ALT_DRAG_HINT_STORAGE_KEY, 'true')
+    } catch {
+      // Ignore storage read/write issues for this non-critical hint.
+    }
+    updateAltDragHintPosition(event.clientX, event.clientY)
+    setIsAltDragHintVisible(true)
+  }
 
   function showLockBlockedFeedback() {
     const now = Date.now()
@@ -1002,6 +1040,7 @@ export function Canvas() {
     if (dragState) return
     setSmartGuides((prev) => (prev.vertical || prev.horizontal ? { vertical: null, horizontal: null } : prev))
     setMagneticSnapLinkedIds((prev) => (prev.length > 0 ? [] : prev))
+    hideAltDragHint()
   }, [dragState])
 
   useEffect(() => {
@@ -1442,6 +1481,16 @@ export function Canvas() {
   }, [])
 
   useEffect(() => {
+    if (!isAltDragHintVisible) return
+    function handleKeyDown(event) {
+      if (event.key !== 'Alt') return
+      hideAltDragHint()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isAltDragHintVisible])
+
+  useEffect(() => {
     window.dispatchEvent(new CustomEvent('curate:toolbar-state', {
       detail: { isCommentMode, isCanvasLocked, isMagneticSnapEnabled },
     }))
@@ -1860,6 +1909,16 @@ async function createImagesFromFiles(files, baseX, baseY) {
       }
 
       if (dragState) {
+        if (isAltDragHintVisible) {
+          updateAltDragHintPosition(event.clientX, event.clientY)
+          const groupedDragStillActive = dragState.draggedIds.some((id) => {
+            const current = imagesRef.current.find((entry) => entry.id === id)
+            if (!current?.magneticGroupId) return false
+            return imagesRef.current.filter((entry) => entry.magneticGroupId === current.magneticGroupId).length > 1
+          })
+          if (!groupedDragStillActive) hideAltDragHint()
+        }
+        if (event.altKey) hideAltDragHint()
         const pointer = toCanvasPoint(event.clientX, event.clientY, rect, offsetX, offsetY, scale)
         let dx = pointer.x - dragState.startPointerX
         let dy = pointer.y - dragState.startPointerY
@@ -2176,6 +2235,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       setPanState(null)
       setResizeState(null)
       setMarqueeState(null)
+      hideAltDragHint()
     }
 
     window.addEventListener('mousemove', handleMouseMove)
@@ -2184,7 +2244,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled, isMagneticSnapEnabled, isCommentMode, isCanvasLocked])
+  }, [dragState, commentDragState, panState, resizeState, marqueeState, cropInteraction, cropMode, quickCropState, scale, offsetX, offsetY, images, isSnappingEnabled, isImageSnappingEnabled, isMagneticSnapEnabled, isCommentMode, isCanvasLocked, isAltDragHintVisible])
 
   function handleDragOver(event) {
     if (quickCropState) return
@@ -2351,6 +2411,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
       ),
       historySnapshot: { images: imagesRef.current, selectedImageIds: selectedIdsRef.current },
     })
+    maybeShowAltDragHint(event, image)
   }
 
   function handleResizeHandleMouseDown(event, image, handle) {
@@ -3427,6 +3488,11 @@ async function createImagesFromFiles(files, baseX, baseY) {
       ) : null}
 
       {isSnappingEnabled ? <div className="canvas-snapping-indicator">Snapping on</div> : null}
+      {isAltDragHintVisible ? (
+        <div ref={altDragHintRef} className="canvas-alt-drag-hint" role="status" aria-live="polite">
+          Hold Alt to move independently
+        </div>
+      ) : null}
       {lockFeedback ? (
         <div className="canvas-lock-toast" role="status" aria-live="polite">
           <span className="canvas-lock-toast__icon" aria-hidden="true">
