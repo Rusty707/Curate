@@ -199,12 +199,12 @@ body.theme-light .left-toolbar__button--lock.is-locked-active {
   background: color-mix(in srgb, #ff0000 10%, transparent);
 }
 
-.left-toolbar__button--cluster.is-cluster-active {
+.left-toolbar__button--magnetic-snap.is-magnetic-snap-active {
   color: #c18f2f;
   background: color-mix(in srgb, #c18f2f 16%, transparent);
 }
 
-body.theme-light .left-toolbar__button--cluster.is-cluster-active {
+body.theme-light .left-toolbar__button--magnetic-snap.is-magnetic-snap-active {
   color: #8a661f;
   background: color-mix(in srgb, #c18f2f 12%, transparent);
 }
@@ -229,7 +229,7 @@ body.theme-light .left-toolbar__button--cluster.is-cluster-active {
   z-index: 1200;
 }
 
-.left-toolbar__mode-badge--cluster {
+.left-toolbar__mode-badge--magnetic-snap {
   border-color: color-mix(in srgb, #e9d39f 62%, transparent);
   background: #8a661f;
 }

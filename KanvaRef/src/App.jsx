@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Grid2x2, Link, Lock, MessageSquare, Moon, Pencil, Plus, RotateCcw, SquareStack, Sun, Trash2, Unlock } from 'lucide-react'
+import { Grid2x2, Link, Lock, Magnet, MessageSquare, Moon, Pencil, Plus, RotateCcw, Sun, Trash2, Unlock } from 'lucide-react'
 import { Board } from './pages/Board'
 import { getImage } from './storage/imageDB'
 import { generateBoardId } from './utils/id'
@@ -148,7 +148,7 @@ function App() {
   const [copied, setCopied] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('curate-theme') || 'dark')
   const [isBoardsOpen, setIsBoardsOpen] = useState(false)
-  const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false, isClusterMode: false })
+  const [canvasToolbarState, setCanvasToolbarState] = useState({ isCommentMode: false, isCanvasLocked: false, isMagneticSnapEnabled: false })
   const [editingBoardId, setEditingBoardId] = useState(null)
   const [editingBoardName, setEditingBoardName] = useState('')
   const [recentBoards, setRecentBoards] = useState(() => {
@@ -236,7 +236,7 @@ function App() {
       setCanvasToolbarState({
         isCommentMode: Boolean(detail.isCommentMode),
         isCanvasLocked: Boolean(detail.isCanvasLocked),
-        isClusterMode: Boolean(detail.isClusterMode),
+        isMagneticSnapEnabled: Boolean(detail.isMagneticSnapEnabled),
       })
     }
     window.addEventListener('curate:toolbar-state', handleCanvasToolbarState)
@@ -500,15 +500,15 @@ function App() {
         <div className="left-toolbar__mode-indicator">
           <button
             type="button"
-            className={`left-toolbar__button left-toolbar__button--cluster ${canvasToolbarState.isClusterMode ? 'is-cluster-active' : ''}`.trim()}
-            onClick={() => dispatchCanvasToolbarAction('toggle-cluster')}
-            aria-label={canvasToolbarState.isClusterMode ? 'Disable cluster mode' : 'Create cluster'}
-            data-tooltip={canvasToolbarState.isClusterMode ? 'Cluster Mode Active' : 'Create Cluster'}
+            className={`left-toolbar__button left-toolbar__button--magnetic-snap ${canvasToolbarState.isMagneticSnapEnabled ? 'is-magnetic-snap-active' : ''}`.trim()}
+            onClick={() => dispatchCanvasToolbarAction('toggle-magnetic-snap')}
+            aria-label={canvasToolbarState.isMagneticSnapEnabled ? 'Disable magnetic snap' : 'Enable magnetic snap'}
+            data-tooltip={canvasToolbarState.isMagneticSnapEnabled ? 'Magnetic Snap On' : 'Magnetic Snap Off'}
           >
-            <span className="btn__icon" aria-hidden="true"><SquareStack size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
+            <span className="btn__icon" aria-hidden="true"><Magnet size={NAV_ICON_SIZE} strokeWidth={ICON_STROKE_WIDTH} /></span>
           </button>
-          {canvasToolbarState.isClusterMode ? (
-            <div className="left-toolbar__mode-badge left-toolbar__mode-badge--cluster" role="status" aria-live="polite">CLUSTER MODE</div>
+          {canvasToolbarState.isMagneticSnapEnabled ? (
+            <div className="left-toolbar__mode-badge left-toolbar__mode-badge--magnetic-snap" role="status" aria-live="polite">MAGNETIC SNAP</div>
           ) : null}
         </div>
         <button
