@@ -251,6 +251,10 @@
   background: rgba(16, 22, 30, 0.35);
 }
 
+.canvas-link-thumbnail__media.is-fallback {
+  background: linear-gradient(145deg, rgba(45, 72, 118, 0.86), rgba(21, 35, 58, 0.92));
+}
+
 .canvas-link-thumbnail__image {
   width: 100%;
   height: 100%;
@@ -259,11 +263,36 @@
 }
 
 .canvas-link-thumbnail__skeleton {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.08));
   background-size: 200% 100%;
   animation: link-skeleton-shimmer 1.1s linear infinite;
+}
+
+.canvas-link-thumbnail__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+}
+
+.canvas-link-thumbnail__placeholder-domain {
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: rgba(244, 248, 255, 0.96);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: lowercase;
 }
 
 .canvas-link-thumbnail__body {

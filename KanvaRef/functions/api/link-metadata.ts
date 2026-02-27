@@ -38,6 +38,26 @@ function sanitizeUrl(input: string): URL | null {
   }
 }
 
+function sanitizeImageUrl(raw: string | null, base: URL): string {
+  if (typeof raw !== 'string' || !raw.trim()) return ''
+  const value = raw.trim()
+  const lowered = value.toLowerCase()
+  if (
+    lowered.startsWith('data:') ||
+    lowered.startsWith('blob:') ||
+    lowered.startsWith('javascript:')
+  ) {
+    return ''
+  }
+  try {
+    const resolved = new URL(value, base)
+    if (resolved.protocol !== 'https:') return ''
+    return resolved.toString()
+  } catch {
+    return ''
+  }
+}
+
 function decodeHtml(value: string): string {
   return value
     .replace(/&amp;/g, '&')
@@ -122,14 +142,18 @@ export const onRequestGet = async ({
   const title = ogTitle || extractTitle(html) || url.hostname
   const domain = url.hostname.replace(/^www\./, '')
   const siteName = ogSiteName || domain
-  const imageUrl = ogImage || screenshotFallbackUrl(url.toString())
+  const ogImageUrl = sanitizeImageUrl(ogImage, url)
+  const screenshotUrl = screenshotFallbackUrl(url.toString())
+  const imageUrl = ogImageUrl || screenshotUrl
 
   return jsonResponse(request, {
     href: url.toString(),
     title,
     domain,
     siteName,
+    ogImageUrl,
+    screenshotUrl,
     imageUrl,
-    fallback: !ogImage,
+    fallback: !ogImageUrl,
   })
 }

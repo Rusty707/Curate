@@ -66,6 +66,7 @@ const PALETTE_SIMILARITY_DELTA = 24
 const LINK_THUMBNAIL_DEFAULT_WIDTH = 304
 const LINK_THUMBNAIL_DEFAULT_HEIGHT = 214
 const LINK_METADATA_CACHE_KEY = 'kanvaref:link-meta-cache-v1'
+const LINK_THUMBNAIL_LOAD_TIMEOUT_MS = 5000
 
 function normalizeImageComment(comment) {
   if (!comment || typeof comment !== 'object') return null
@@ -223,7 +224,25 @@ function normalizeLinkThumbnailItem(item) {
     ? item.domain.trim()
     : new URL(href).hostname.replace(/^www\./, '')
   const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : href
-  const imageUrl = typeof item.imageUrl === 'string' && item.imageUrl.trim() ? item.imageUrl.trim() : ''
+  const imageUrl = sanitizeThumbnailImageUrl(item.imageUrl)
+  const ogImageUrl = sanitizeThumbnailImageUrl(item.ogImageUrl)
+  const screenshotUrl = sanitizeThumbnailImageUrl(item.screenshotUrl)
+  const rawStatus = typeof item.thumbnailStatus === 'string' ? item.thumbnailStatus : ''
+  const thumbnailStatus =
+    rawStatus === 'loading' || rawStatus === 'loaded' || rawStatus === 'fallback' || rawStatus === 'error'
+      ? rawStatus
+      : Boolean(item.isLoading)
+        ? 'loading'
+        : imageUrl
+          ? 'loaded'
+          : 'fallback'
+  const thumbnailSourceRaw = typeof item.thumbnailSource === 'string' ? item.thumbnailSource : ''
+  const thumbnailSource =
+    thumbnailSourceRaw === 'og' || thumbnailSourceRaw === 'screenshot' || thumbnailSourceRaw === 'placeholder'
+      ? thumbnailSourceRaw
+      : imageUrl
+        ? 'og'
+        : 'placeholder'
   return {
     id: typeof item.id === 'string' && item.id ? item.id : crypto.randomUUID(),
     type: 'link-thumbnail',
@@ -233,11 +252,15 @@ function normalizeLinkThumbnailItem(item) {
     width: LINK_THUMBNAIL_DEFAULT_WIDTH,
     height: LINK_THUMBNAIL_DEFAULT_HEIGHT,
     imageUrl,
+    ogImageUrl,
+    screenshotUrl,
     title,
     domain,
     href,
     siteName: typeof item.siteName === 'string' && item.siteName.trim() ? item.siteName.trim() : domain,
-    isLoading: Boolean(item.isLoading),
+    thumbnailStatus,
+    thumbnailSource,
+    thumbnailFetched: Boolean(item.thumbnailFetched),
     magneticGroupId: typeof item.magneticGroupId === 'string' && item.magneticGroupId ? item.magneticGroupId : null,
     createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
   }
@@ -498,9 +521,14 @@ function serializeLinkThumbnailsForStorage(thumbnails) {
       y: item.y,
       href: item.href,
       imageUrl: item.imageUrl,
+      ogImageUrl: item.ogImageUrl,
+      screenshotUrl: item.screenshotUrl,
       title: item.title,
       domain: item.domain,
       siteName: item.siteName,
+      thumbnailStatus: item.thumbnailStatus,
+      thumbnailSource: item.thumbnailSource,
+      thumbnailFetched: Boolean(item.thumbnailFetched),
       magneticGroupId: item.magneticGroupId ?? null,
       createdAt: item.createdAt,
     }))
@@ -693,6 +721,21 @@ function sanitizeExternalUrl(raw) {
     return url.toString()
   } catch {
     return null
+  }
+}
+
+function sanitizeThumbnailImageUrl(raw) {
+  if (typeof raw !== 'string') return ''
+  const value = raw.trim()
+  if (!value) return ''
+  const lowered = value.toLowerCase()
+  if (lowered.startsWith('data:') || lowered.startsWith('blob:') || lowered.startsWith('javascript:')) return ''
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:') return ''
+    return url.toString()
+  } catch {
+    return ''
   }
 }
 
@@ -1267,6 +1310,7 @@ export function Canvas() {
   const selectedPaletteIdsRef = useRef(selectedPaletteIds)
   const selectedLinkThumbnailIdsRef = useRef(selectedLinkThumbnailIds)
   const linkMetadataCacheRef = useRef(new Map())
+  const linkThumbnailTimeoutsRef = useRef(new Map())
   const linkPasteDebounceRef = useRef(null)
   const historyRef = useRef(history)
   const futureRef = useRef(future)
@@ -1275,6 +1319,10 @@ export function Canvas() {
   const persistCountRef = useRef(0)
 
   function resetBoardRuntimeState() {
+    for (const timeoutId of linkThumbnailTimeoutsRef.current.values()) {
+      clearTimeout(timeoutId)
+    }
+    linkThumbnailTimeoutsRef.current.clear()
     setImages([])
     setComments([])
     setPalettes([])
@@ -1383,6 +1431,29 @@ export function Canvas() {
   }, [palettes])
   useEffect(() => {
     linkThumbnailsRef.current = linkThumbnails
+  }, [linkThumbnails])
+  useEffect(() => () => {
+    for (const timeoutId of linkThumbnailTimeoutsRef.current.values()) {
+      clearTimeout(timeoutId)
+    }
+    linkThumbnailTimeoutsRef.current.clear()
+  }, [])
+  useEffect(() => {
+    const activeLoadingIds = new Set()
+    for (const item of linkThumbnails) {
+      if (item.thumbnailStatus !== 'loading' || !item.imageUrl) continue
+      activeLoadingIds.add(item.id)
+      if (linkThumbnailTimeoutsRef.current.has(item.id)) continue
+      const timeoutId = setTimeout(() => {
+        handleLinkThumbnailImageTimeout(item.id)
+      }, LINK_THUMBNAIL_LOAD_TIMEOUT_MS)
+      linkThumbnailTimeoutsRef.current.set(item.id, timeoutId)
+    }
+    for (const [id, timeoutId] of linkThumbnailTimeoutsRef.current.entries()) {
+      if (activeLoadingIds.has(id)) continue
+      clearTimeout(timeoutId)
+      linkThumbnailTimeoutsRef.current.delete(id)
+    }
   }, [linkThumbnails])
   useEffect(() => {
     const previous = previousImageSrcsRef.current
@@ -2204,6 +2275,52 @@ export function Canvas() {
     return { x: (rect.width / 2 - offsetX) / scale, y: (rect.height / 2 - offsetY) / scale }
   }
 
+  function getScreenshotFallbackUrl(href) {
+    return `https://image.thum.io/get/width/1200/noanimate/${encodeURIComponent(href)}`
+  }
+
+  function normalizeLinkMetadataEntry(href, value) {
+    const normalizedHref = sanitizeExternalUrl(value?.href || href) || href
+    const normalizedDomain =
+      typeof value?.domain === 'string' && value.domain.trim()
+        ? value.domain.trim()
+        : new URL(normalizedHref).hostname.replace(/^www\./, '')
+    return {
+      href: normalizedHref,
+      title: typeof value?.title === 'string' && value.title.trim() ? value.title.trim() : normalizedHref,
+      domain: normalizedDomain,
+      siteName: typeof value?.siteName === 'string' && value.siteName.trim() ? value.siteName.trim() : normalizedDomain,
+      ogImageUrl: sanitizeThumbnailImageUrl(value?.ogImageUrl || value?.imageUrl),
+      screenshotUrl: sanitizeThumbnailImageUrl(value?.screenshotUrl || getScreenshotFallbackUrl(normalizedHref)),
+      ogFailed: Boolean(value?.ogFailed),
+      screenshotFailed: Boolean(value?.screenshotFailed),
+    }
+  }
+
+  function getInitialThumbnailCandidate(metadata) {
+    const ogCandidate = metadata.ogFailed ? '' : sanitizeThumbnailImageUrl(metadata.ogImageUrl)
+    if (ogCandidate) {
+      return {
+        imageUrl: ogCandidate,
+        thumbnailSource: 'og',
+        thumbnailStatus: 'loading',
+      }
+    }
+    const screenshotCandidate = metadata.screenshotFailed ? '' : sanitizeThumbnailImageUrl(metadata.screenshotUrl)
+    if (screenshotCandidate) {
+      return {
+        imageUrl: screenshotCandidate,
+        thumbnailSource: 'screenshot',
+        thumbnailStatus: 'loading',
+      }
+    }
+    return {
+      imageUrl: '',
+      thumbnailSource: 'placeholder',
+      thumbnailStatus: 'fallback',
+    }
+  }
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LINK_METADATA_CACHE_KEY)
@@ -2214,7 +2331,7 @@ export function Canvas() {
       for (const [href, data] of Object.entries(parsed)) {
         if (!sanitizeExternalUrl(href)) continue
         if (!data || typeof data !== 'object') continue
-        next.set(href, data)
+        next.set(href, normalizeLinkMetadataEntry(href, data))
       }
       linkMetadataCacheRef.current = next
     } catch {
@@ -2232,25 +2349,170 @@ export function Canvas() {
     }
   }
 
+  function updateLinkMetadataEntry(href, updater) {
+    const current = normalizeLinkMetadataEntry(href, linkMetadataCacheRef.current.get(href) || {})
+    const next = normalizeLinkMetadataEntry(href, updater(current))
+    linkMetadataCacheRef.current.set(href, next)
+    persistLinkMetadataCache()
+    return next
+  }
+
   async function fetchLinkMetadata(href) {
     const cached = linkMetadataCacheRef.current.get(href)
-    if (cached) return cached
+    if (cached) return normalizeLinkMetadataEntry(href, cached)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), LINK_THUMBNAIL_LOAD_TIMEOUT_MS)
     const response = await fetch(`/api/link-metadata?url=${encodeURIComponent(href)}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeoutId)
     })
     if (!response.ok) throw new Error('metadata fetch failed')
     const payload = await response.json()
-    const normalized = {
-      href: sanitizeExternalUrl(payload?.href || href) || href,
-      imageUrl: typeof payload?.imageUrl === 'string' ? payload.imageUrl : '',
-      title: typeof payload?.title === 'string' && payload.title.trim() ? payload.title.trim() : href,
-      domain: typeof payload?.domain === 'string' && payload.domain.trim() ? payload.domain.trim() : new URL(href).hostname.replace(/^www\./, ''),
-      siteName: typeof payload?.siteName === 'string' && payload.siteName.trim() ? payload.siteName.trim() : '',
-    }
+    const normalized = normalizeLinkMetadataEntry(href, payload)
     linkMetadataCacheRef.current.set(href, normalized)
     persistLinkMetadataCache()
     return normalized
+  }
+
+  function clearLinkThumbnailLoadTimeout(id) {
+    const timeoutId = linkThumbnailTimeoutsRef.current.get(id)
+    if (!timeoutId) return
+    clearTimeout(timeoutId)
+    linkThumbnailTimeoutsRef.current.delete(id)
+  }
+
+  function handleLinkThumbnailImageLoad(id) {
+    clearLinkThumbnailLoadTimeout(id)
+    const current = linkThumbnailsRef.current.find((item) => item.id === id)
+    if (!current) return
+    if (current.thumbnailSource === 'og') {
+      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, ogFailed: false }))
+    } else if (current.thumbnailSource === 'screenshot') {
+      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, screenshotFailed: false }))
+    }
+    setLinkThumbnails((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, thumbnailStatus: 'loaded' } : item)),
+    )
+  }
+
+  function handleLinkThumbnailImageFailure(id, reason = 'error') {
+    clearLinkThumbnailLoadTimeout(id)
+    const current = linkThumbnailsRef.current.find((item) => item.id === id)
+    if (!current || current.thumbnailStatus !== 'loading') return
+    if (current.thumbnailSource === 'og') {
+      const cached = updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, ogFailed: true }))
+      const screenshotCandidate =
+        cached.screenshotFailed
+          ? ''
+          : sanitizeThumbnailImageUrl(current.screenshotUrl || cached.screenshotUrl)
+      if (screenshotCandidate) {
+        setLinkThumbnails((prev) =>
+          prev.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  imageUrl: screenshotCandidate,
+                  thumbnailSource: 'screenshot',
+                  thumbnailStatus: 'loading',
+                }
+              : item,
+          ),
+        )
+        return
+      }
+      setLinkThumbnails((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                imageUrl: '',
+                thumbnailSource: 'placeholder',
+                thumbnailStatus: 'fallback',
+                title: item.title || item.domain || 'Preview unavailable',
+              }
+            : item,
+        ),
+      )
+      return
+    }
+
+    if (current.thumbnailSource === 'screenshot') {
+      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, screenshotFailed: true }))
+    }
+    setLinkThumbnails((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              imageUrl: '',
+              thumbnailSource: 'placeholder',
+              thumbnailStatus: reason === 'timeout' ? 'fallback' : 'error',
+              title: item.title || item.domain || 'Preview unavailable',
+            }
+          : item,
+      ),
+    )
+  }
+
+  function handleLinkThumbnailImageTimeout(id) {
+    handleLinkThumbnailImageFailure(id, 'timeout')
+  }
+
+  async function hydrateLinkThumbnailMetadata(id, href) {
+    const current = linkThumbnailsRef.current.find((item) => item.id === id)
+    if (!current || current.thumbnailFetched) return
+    setLinkThumbnails((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              thumbnailFetched: true,
+              thumbnailStatus: 'loading',
+            }
+          : item,
+      ),
+    )
+    try {
+      const metadata = await fetchLinkMetadata(href)
+      const candidate = getInitialThumbnailCandidate(metadata)
+      setLinkThumbnails((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                href: metadata.href,
+                ogImageUrl: metadata.ogImageUrl,
+                screenshotUrl: metadata.screenshotUrl,
+                title: metadata.title,
+                domain: metadata.domain,
+                siteName: metadata.siteName || metadata.domain,
+                imageUrl: candidate.imageUrl,
+                thumbnailSource: candidate.thumbnailSource,
+                thumbnailStatus: candidate.thumbnailStatus,
+                thumbnailFetched: true,
+              }
+            : item,
+        ),
+      )
+    } catch {
+      setLinkThumbnails((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                thumbnailFetched: true,
+                imageUrl: '',
+                thumbnailSource: 'placeholder',
+                thumbnailStatus: 'error',
+                title: item.domain || 'Preview unavailable',
+              }
+            : item,
+        ),
+      )
+    }
   }
 
   async function createLinkThumbnailFromUrl(href) {
@@ -2271,7 +2533,11 @@ export function Canvas() {
       title: 'Loading preview...',
       domain: new URL(href).hostname.replace(/^www\./, ''),
       siteName: '',
-      isLoading: true,
+      ogImageUrl: '',
+      screenshotUrl: getScreenshotFallbackUrl(href),
+      thumbnailStatus: 'loading',
+      thumbnailSource: 'placeholder',
+      thumbnailFetched: false,
       magneticGroupId: null,
       createdAt: Date.now(),
     })
@@ -2288,33 +2554,7 @@ export function Canvas() {
     setPasteCount((prev) => prev + 1)
     setMenuState(null)
     commitHistory(prevImages, prevSelected, prevComments, prevPalettes, prevLinks)
-    void fetchLinkMetadata(href)
-      .then((metadata) => {
-        setLinkThumbnails((prev) =>
-          prev.map((item) =>
-            item.id === placeholder.id
-              ? {
-                  ...item,
-                  href: metadata.href,
-                  imageUrl: metadata.imageUrl,
-                  title: metadata.title,
-                  domain: metadata.domain,
-                  siteName: metadata.siteName || metadata.domain,
-                  isLoading: false,
-                }
-              : item,
-          ),
-        )
-      })
-      .catch(() => {
-        setLinkThumbnails((prev) =>
-          prev.map((item) =>
-            item.id === placeholder.id
-              ? { ...item, title: item.domain || 'Preview unavailable', isLoading: false }
-              : item,
-          ),
-        )
-      })
+    void hydrateLinkThumbnailMetadata(placeholder.id, href)
     return true
   }
 
@@ -4654,6 +4894,9 @@ async function createImagesFromFiles(files, baseX, baseY) {
           {linkThumbnails.map((item) => {
             const size = getLinkThumbnailSize(item)
             const isSelected = selectedLinkThumbnailIds.includes(item.id)
+            const showsImage = Boolean(item.imageUrl) && (item.thumbnailStatus === 'loading' || item.thumbnailStatus === 'loaded')
+            const showsSkeleton = item.thumbnailStatus === 'loading'
+            const showsPlaceholder = item.thumbnailStatus === 'fallback' || item.thumbnailStatus === 'error'
             return (
               <article
                 key={item.id}
@@ -4676,10 +4919,27 @@ async function createImagesFromFiles(files, baseX, baseY) {
                 <span className="canvas-link-thumbnail__arrow" aria-hidden="true">
                   <ExternalLink size={13} strokeWidth={ICON_STROKE_WIDTH} />
                 </span>
-                <div className="canvas-link-thumbnail__media">
-                  {item.imageUrl
-                    ? <img src={item.imageUrl} alt="" className="canvas-link-thumbnail__image" draggable={false} />
-                    : <div className="canvas-link-thumbnail__skeleton" />}
+                <div className={`canvas-link-thumbnail__media ${showsPlaceholder ? 'is-fallback' : ''}`.trim()}>
+                  {showsImage
+                    ? (
+                      <img
+                        src={item.imageUrl}
+                        alt=""
+                        className="canvas-link-thumbnail__image"
+                        draggable={false}
+                        onLoad={() => handleLinkThumbnailImageLoad(item.id)}
+                        onError={() => handleLinkThumbnailImageFailure(item.id)}
+                      />
+                    )
+                    : null}
+                  {showsSkeleton ? <div className="canvas-link-thumbnail__skeleton" /> : null}
+                  {showsPlaceholder
+                    ? (
+                      <div className="canvas-link-thumbnail__placeholder">
+                        <div className="canvas-link-thumbnail__placeholder-domain">{item.domain}</div>
+                      </div>
+                    )
+                    : null}
                 </div>
                 <div className="canvas-link-thumbnail__body">
                   <div className="canvas-link-thumbnail__title">{item.title || item.domain}</div>
