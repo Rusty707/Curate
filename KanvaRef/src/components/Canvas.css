@@ -247,7 +247,8 @@
 .canvas-link-thumbnail__media {
   position: relative;
   width: 100%;
-  height: 162px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
   background: rgba(16, 22, 30, 0.35);
 }
 
@@ -256,10 +257,13 @@
 }
 
 .canvas-link-thumbnail__image {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  border: 0;
 }
 
 .canvas-link-thumbnail__skeleton {
@@ -276,10 +280,19 @@
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
+  gap: 12px;
   align-items: center;
   justify-content: center;
   padding: 12px;
   text-align: center;
+}
+
+.canvas-link-thumbnail__placeholder-favicon {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.22);
 }
 
 .canvas-link-thumbnail__placeholder-domain {

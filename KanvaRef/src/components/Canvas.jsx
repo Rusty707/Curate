@@ -225,8 +225,6 @@ function normalizeLinkThumbnailItem(item) {
     : new URL(href).hostname.replace(/^www\./, '')
   const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : href
   const imageUrl = sanitizeThumbnailImageUrl(item.imageUrl)
-  const ogImageUrl = sanitizeThumbnailImageUrl(item.ogImageUrl)
-  const screenshotUrl = sanitizeThumbnailImageUrl(item.screenshotUrl)
   const rawStatus = typeof item.thumbnailStatus === 'string' ? item.thumbnailStatus : ''
   const thumbnailStatus =
     rawStatus === 'loading' || rawStatus === 'loaded' || rawStatus === 'fallback' || rawStatus === 'error'
@@ -238,10 +236,10 @@ function normalizeLinkThumbnailItem(item) {
           : 'fallback'
   const thumbnailSourceRaw = typeof item.thumbnailSource === 'string' ? item.thumbnailSource : ''
   const thumbnailSource =
-    thumbnailSourceRaw === 'og' || thumbnailSourceRaw === 'screenshot' || thumbnailSourceRaw === 'placeholder'
+    thumbnailSourceRaw === 'preview' || thumbnailSourceRaw === 'placeholder'
       ? thumbnailSourceRaw
       : imageUrl
-        ? 'og'
+        ? 'preview'
         : 'placeholder'
   return {
     id: typeof item.id === 'string' && item.id ? item.id : crypto.randomUUID(),
@@ -252,8 +250,6 @@ function normalizeLinkThumbnailItem(item) {
     width: LINK_THUMBNAIL_DEFAULT_WIDTH,
     height: LINK_THUMBNAIL_DEFAULT_HEIGHT,
     imageUrl,
-    ogImageUrl,
-    screenshotUrl,
     title,
     domain,
     href,
@@ -521,8 +517,6 @@ function serializeLinkThumbnailsForStorage(thumbnails) {
       y: item.y,
       href: item.href,
       imageUrl: item.imageUrl,
-      ogImageUrl: item.ogImageUrl,
-      screenshotUrl: item.screenshotUrl,
       title: item.title,
       domain: item.domain,
       siteName: item.siteName,
@@ -731,8 +725,11 @@ function sanitizeThumbnailImageUrl(raw) {
   const lowered = value.toLowerCase()
   if (lowered.startsWith('data:') || lowered.startsWith('blob:') || lowered.startsWith('javascript:')) return ''
   try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:') return ''
+    const base = typeof window !== 'undefined' ? window.location.origin : 'https://kanvaref.app'
+    const url = new URL(value, base)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
+    if (typeof window !== 'undefined' && url.origin !== window.location.origin) return ''
+    if (!url.pathname.startsWith('/api/link-preview')) return ''
     return url.toString()
   } catch {
     return ''
@@ -744,6 +741,11 @@ function parseFirstUrlFromText(raw) {
   const match = raw.match(/https?:\/\/[^\s<>"']+/i)
   if (!match) return null
   return sanitizeExternalUrl(match[0])
+}
+
+function getDomainFaviconUrl(domain) {
+  if (typeof domain !== 'string' || !domain.trim()) return ''
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain.trim())}&sz=64`
 }
 
 function isTransformableEntity(entity) {
@@ -2275,10 +2277,6 @@ export function Canvas() {
     return { x: (rect.width / 2 - offsetX) / scale, y: (rect.height / 2 - offsetY) / scale }
   }
 
-  function getScreenshotFallbackUrl(href) {
-    return `https://image.thum.io/get/width/1200/noanimate/${encodeURIComponent(href)}`
-  }
-
   function normalizeLinkMetadataEntry(href, value) {
     const normalizedHref = sanitizeExternalUrl(value?.href || href) || href
     const normalizedDomain =
@@ -2290,27 +2288,16 @@ export function Canvas() {
       title: typeof value?.title === 'string' && value.title.trim() ? value.title.trim() : normalizedHref,
       domain: normalizedDomain,
       siteName: typeof value?.siteName === 'string' && value.siteName.trim() ? value.siteName.trim() : normalizedDomain,
-      ogImageUrl: sanitizeThumbnailImageUrl(value?.ogImageUrl || value?.imageUrl),
-      screenshotUrl: sanitizeThumbnailImageUrl(value?.screenshotUrl || getScreenshotFallbackUrl(normalizedHref)),
-      ogFailed: Boolean(value?.ogFailed),
-      screenshotFailed: Boolean(value?.screenshotFailed),
+      imageUrl: sanitizeThumbnailImageUrl(value?.imageUrl),
     }
   }
 
   function getInitialThumbnailCandidate(metadata) {
-    const ogCandidate = metadata.ogFailed ? '' : sanitizeThumbnailImageUrl(metadata.ogImageUrl)
-    if (ogCandidate) {
+    const previewCandidate = sanitizeThumbnailImageUrl(metadata.imageUrl)
+    if (previewCandidate) {
       return {
-        imageUrl: ogCandidate,
-        thumbnailSource: 'og',
-        thumbnailStatus: 'loading',
-      }
-    }
-    const screenshotCandidate = metadata.screenshotFailed ? '' : sanitizeThumbnailImageUrl(metadata.screenshotUrl)
-    if (screenshotCandidate) {
-      return {
-        imageUrl: screenshotCandidate,
-        thumbnailSource: 'screenshot',
+        imageUrl: previewCandidate,
+        thumbnailSource: 'preview',
         thumbnailStatus: 'loading',
       }
     }
@@ -2349,20 +2336,12 @@ export function Canvas() {
     }
   }
 
-  function updateLinkMetadataEntry(href, updater) {
-    const current = normalizeLinkMetadataEntry(href, linkMetadataCacheRef.current.get(href) || {})
-    const next = normalizeLinkMetadataEntry(href, updater(current))
-    linkMetadataCacheRef.current.set(href, next)
-    persistLinkMetadataCache()
-    return next
-  }
-
   async function fetchLinkMetadata(href) {
     const cached = linkMetadataCacheRef.current.get(href)
     if (cached) return normalizeLinkMetadataEntry(href, cached)
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), LINK_THUMBNAIL_LOAD_TIMEOUT_MS)
-    const response = await fetch(`/api/link-metadata?url=${encodeURIComponent(href)}`, {
+    const response = await fetch(`/api/link-preview?url=${encodeURIComponent(href)}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
       signal: controller.signal,
@@ -2386,46 +2365,18 @@ export function Canvas() {
 
   function handleLinkThumbnailImageLoad(id) {
     clearLinkThumbnailLoadTimeout(id)
-    const current = linkThumbnailsRef.current.find((item) => item.id === id)
-    if (!current) return
-    if (current.thumbnailSource === 'og') {
-      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, ogFailed: false }))
-    } else if (current.thumbnailSource === 'screenshot') {
-      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, screenshotFailed: false }))
-    }
     setLinkThumbnails((prev) =>
       prev.map((item) => (item.id === id ? { ...item, thumbnailStatus: 'loaded' } : item)),
     )
   }
 
-  function handleLinkThumbnailImageFailure(id, reason = 'error') {
+  function handleLinkThumbnailImageFailure(id) {
     clearLinkThumbnailLoadTimeout(id)
     const current = linkThumbnailsRef.current.find((item) => item.id === id)
     if (!current || current.thumbnailStatus !== 'loading') return
-    if (current.thumbnailSource === 'og') {
-      const cached = updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, ogFailed: true }))
-      const screenshotCandidate =
-        cached.screenshotFailed
-          ? ''
-          : sanitizeThumbnailImageUrl(current.screenshotUrl || cached.screenshotUrl)
-      if (screenshotCandidate) {
-        setLinkThumbnails((prev) =>
-          prev.map((item) =>
-            item.id === id
-              ? {
-                  ...item,
-                  imageUrl: screenshotCandidate,
-                  thumbnailSource: 'screenshot',
-                  thumbnailStatus: 'loading',
-                }
-              : item,
-          ),
-        )
-        return
-      }
-      setLinkThumbnails((prev) =>
-        prev.map((item) =>
-          item.id === id
+    setLinkThumbnails((prev) =>
+      prev.map((item) =>
+        item.id === id
             ? {
                 ...item,
                 imageUrl: '',
@@ -2434,31 +2385,12 @@ export function Canvas() {
                 title: item.title || item.domain || 'Preview unavailable',
               }
             : item,
-        ),
-      )
-      return
-    }
-
-    if (current.thumbnailSource === 'screenshot') {
-      updateLinkMetadataEntry(current.href, (entry) => ({ ...entry, screenshotFailed: true }))
-    }
-    setLinkThumbnails((prev) =>
-      prev.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              imageUrl: '',
-              thumbnailSource: 'placeholder',
-              thumbnailStatus: reason === 'timeout' ? 'fallback' : 'error',
-              title: item.title || item.domain || 'Preview unavailable',
-            }
-          : item,
       ),
     )
   }
 
   function handleLinkThumbnailImageTimeout(id) {
-    handleLinkThumbnailImageFailure(id, 'timeout')
+    handleLinkThumbnailImageFailure(id)
   }
 
   async function hydrateLinkThumbnailMetadata(id, href) {
@@ -2484,8 +2416,6 @@ export function Canvas() {
             ? {
                 ...item,
                 href: metadata.href,
-                ogImageUrl: metadata.ogImageUrl,
-                screenshotUrl: metadata.screenshotUrl,
                 title: metadata.title,
                 domain: metadata.domain,
                 siteName: metadata.siteName || metadata.domain,
@@ -2533,8 +2463,6 @@ export function Canvas() {
       title: 'Loading preview...',
       domain: new URL(href).hostname.replace(/^www\./, ''),
       siteName: '',
-      ogImageUrl: '',
-      screenshotUrl: getScreenshotFallbackUrl(href),
       thumbnailStatus: 'loading',
       thumbnailSource: 'placeholder',
       thumbnailFetched: false,
@@ -4926,6 +4854,7 @@ async function createImagesFromFiles(files, baseX, baseY) {
                         src={item.imageUrl}
                         alt=""
                         className="canvas-link-thumbnail__image"
+                        style={{ display: showsPlaceholder ? 'none' : 'block' }}
                         draggable={false}
                         onLoad={() => handleLinkThumbnailImageLoad(item.id)}
                         onError={() => handleLinkThumbnailImageFailure(item.id)}
@@ -4936,6 +4865,12 @@ async function createImagesFromFiles(files, baseX, baseY) {
                   {showsPlaceholder
                     ? (
                       <div className="canvas-link-thumbnail__placeholder">
+                        <img
+                          src={getDomainFaviconUrl(item.domain)}
+                          alt=""
+                          className="canvas-link-thumbnail__placeholder-favicon"
+                          draggable={false}
+                        />
                         <div className="canvas-link-thumbnail__placeholder-domain">{item.domain}</div>
                       </div>
                     )
